@@ -1,21 +1,12 @@
 use crate::types::*;
 use async_std::io::{self, ReadExt, WriteExt};
+use enum_map::EnumMap;
 use num_traits::FromPrimitive;
-use std::collections::HashMap;
+use std::num::NonZeroU32;
 
 fn remove_padding(data: Vec<u8>) -> Vec<u8> {
     let size = u8::from_be(data[0]) as usize;
     data[1..(data.len() - size)].to_vec()
-}
-
-#[derive(thiserror::Error, Debug)]
-pub enum FrameDecodeError {
-    #[error("Unknown frame type")]
-    UnknownType,
-    #[error("Unexpected 0 stream ID")]
-    ZeroStreamId,
-    #[error("Payload is shorter than expexted")]
-    PayloadTooShort,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -43,11 +34,14 @@ pub enum Frame {
         weight: u8,
     },
     /// https://httpwg.org/specs/rfc7540.html#RST_STREAM
-    ResetStream { stream: NonZeroStreamId, error: u32 },
+    ResetStream {
+        stream: NonZeroStreamId,
+        error: ErrorType,
+    },
     /// https://httpwg.org/specs/rfc7540.html#SETTINGS
     Settings {
         flags: SettingsFlags,
-        params: HashMap<SettingsParameter, u32>,
+        params: EnumMap<SettingsParameter, u32>,
     },
     /// https://httpwg.org/specs/rfc7540.html#PUSH_PROMISE
     PushPromise {
@@ -61,13 +55,13 @@ pub enum Frame {
     /// https://httpwg.org/specs/rfc7540.html#GOAWAY
     GoAway {
         last_stream: StreamId,
-        error: u32,
+        error: ErrorType,
         debug: Vec<u8>,
     },
     /// https://httpwg.org/specs/rfc7540.html#WINDOW_UPDATE
     WindowUpdate {
         stream: StreamId,
-        size_increment: u32,
+        increment: NonZeroU32,
     },
     /// https://httpwg.org/specs/rfc7540.html#CONTINUATION
     Continuation {
@@ -78,13 +72,6 @@ pub enum Frame {
 }
 
 impl Frame {
-    pub fn new_settings_ack() -> Self {
-        Self::Settings {
-            flags: SettingsFlags::ACK,
-            params: HashMap::new(),
-        }
-    }
-
     pub async fn read_from(readable: &mut (impl io::Read + Unpin)) -> anyhow::Result<Self> {
         let mut header = [0u8; 9];
         readable.read_exact(&mut header).await?;
@@ -164,16 +151,20 @@ impl Frame {
                 exclusive_dependency: payload[0] & 0b10000u8 != 0,
                 weight: u8::from_be(payload[4]),
             },
-            FrameType::ResetStream => Self::ResetStream {
-                stream: NonZeroStreamId::new(stream).ok_or(FrameDecodeError::ZeroStreamId)?,
-                error: u32::from_be_bytes(
+            FrameType::ResetStream => {
+                let error = u32::from_be_bytes(
                     payload[0..=3]
                         .try_into()
                         .map_err(|_| FrameDecodeError::PayloadTooShort)?,
-                ),
-            },
+                );
+                Self::ResetStream {
+                    stream: NonZeroStreamId::new(stream).ok_or(FrameDecodeError::ZeroStreamId)?,
+                    error: ErrorType::from_u32(error)
+                        .ok_or_else(|| FrameDecodeError::UnknownErrorType(error))?,
+                }
+            }
             FrameType::Settings => {
-                let mut params = HashMap::with_capacity(payload.len() / (2 + 4));
+                let mut params = EnumMap::default();
                 for chunk in payload.chunks(2 + 4) {
                     // spec says to ignore unknown settings
                     if let Some(param) = SettingsParameter::from_u16(u16::from_be_bytes(
@@ -181,13 +172,10 @@ impl Frame {
                             .try_into()
                             .map_err(|_| FrameDecodeError::PayloadTooShort)?,
                     )) {
-                        params.insert(
-                            param,
-                            u32::from_be_bytes(
-                                chunk[2..=5]
-                                    .try_into()
-                                    .map_err(|_| FrameDecodeError::PayloadTooShort)?,
-                            ),
+                        params[param] = u32::from_be_bytes(
+                            chunk[2..=5]
+                                .try_into()
+                                .map_err(|_| FrameDecodeError::PayloadTooShort)?,
                         );
                     }
                 }
@@ -218,26 +206,33 @@ impl Frame {
                 flags: PingFlags::from_bits_truncate(flags),
                 data: payload,
             },
-            FrameType::GoAway => Self::GoAway {
-                last_stream: u32::from_be_bytes(
-                    payload[0..=3]
-                        .try_into()
-                        .map_err(|_| FrameDecodeError::PayloadTooShort)?,
-                ) & (u32::MAX >> 1),
-                error: u32::from_be_bytes(
+            FrameType::GoAway => {
+                let error = u32::from_be_bytes(
                     payload[4..=7]
                         .try_into()
                         .map_err(|_| FrameDecodeError::PayloadTooShort)?,
-                ),
-                debug: payload[8..].to_vec(),
-            },
+                );
+                Self::GoAway {
+                    last_stream: u32::from_be_bytes(
+                        payload[0..=3]
+                            .try_into()
+                            .map_err(|_| FrameDecodeError::PayloadTooShort)?,
+                    ) & (u32::MAX >> 1),
+                    error: ErrorType::from_u32(error)
+                        .ok_or_else(|| FrameDecodeError::UnknownErrorType(error))?,
+                    debug: payload[8..].to_vec(),
+                }
+            }
             FrameType::WindowUpdate => Self::WindowUpdate {
                 stream,
-                size_increment: u32::from_be_bytes(
-                    payload[0..=3]
-                        .try_into()
-                        .map_err(|_| FrameDecodeError::PayloadTooShort)?,
-                ) & (u32::MAX >> 1),
+                increment: NonZeroU32::new(
+                    u32::from_be_bytes(
+                        payload[0..=3]
+                            .try_into()
+                            .map_err(|_| FrameDecodeError::PayloadTooShort)?,
+                    ) & (u32::MAX >> 1),
+                )
+                .ok_or(FrameDecodeError::ZeroWindowIncrement)?,
             },
             FrameType::Continuation => Self::Continuation {
                 stream: NonZeroStreamId::new(stream).ok_or(FrameDecodeError::ZeroStreamId)?,
@@ -328,11 +323,11 @@ impl Frame {
                 payload.push(weight.to_be());
                 payload
             }
-            Self::ResetStream { error, .. } => error.to_be_bytes().to_vec(),
+            Self::ResetStream { error, .. } => (error as u32).to_be_bytes().to_vec(),
             Self::Settings { params, .. } => {
                 let mut payload = Vec::with_capacity((2 + 4) * params.len());
                 for (key, value) in params.iter() {
-                    payload.extend((*key as u16).to_be_bytes());
+                    payload.extend((key as u16).to_be_bytes());
                     payload.extend(value.to_be_bytes());
                 }
                 payload
@@ -354,11 +349,11 @@ impl Frame {
                 ..
             } => {
                 let mut payload = last_stream.to_be_bytes().to_vec();
-                payload.extend(error.to_be_bytes());
+                payload.extend((error as u32).to_be_bytes());
                 payload.extend(debug);
                 payload
             }
-            Self::WindowUpdate { size_increment, .. } => size_increment.to_be_bytes().to_vec(),
+            Self::WindowUpdate { increment, .. } => increment.get().to_be_bytes().to_vec(),
             Self::Continuation { fragment, .. } => fragment,
         }
     }
@@ -379,8 +374,8 @@ impl Frame {
     }
 }
 
-impl From<HashMap<SettingsParameter, u32>> for Frame {
-    fn from(params: HashMap<SettingsParameter, u32>) -> Self {
+impl From<EnumMap<SettingsParameter, u32>> for Frame {
+    fn from(params: EnumMap<SettingsParameter, u32>) -> Self {
         Self::Settings {
             flags: SettingsFlags::empty(),
             params,

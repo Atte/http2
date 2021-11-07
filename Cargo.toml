@@ -13,6 +13,7 @@ num-traits = "0.2"
 num-derive = "0.3"
 maplit = "1.0"
 thiserror = "1.0"
+enum-map = "1.1"
 
 [dependencies.async-std]
 version = "1.10"

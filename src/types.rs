@@ -1,8 +1,26 @@
 use bitflags::bitflags;
 use num_derive::{FromPrimitive, ToPrimitive};
+use std::num::NonZeroU32;
+
+// Safety: value is a const, that can't be zero
+pub const MAX_WINDOW_INCREMENT: NonZeroU32 = unsafe { NonZeroU32::new_unchecked(u32::MAX >> 1) };
 
 pub type StreamId = u32;
 pub type NonZeroStreamId = std::num::NonZeroU32;
+
+#[derive(thiserror::Error, Debug)]
+pub enum FrameDecodeError {
+    #[error("Unknown frame type")]
+    UnknownType,
+    #[error("Payload is shorter than expexted")]
+    PayloadTooShort,
+    #[error("Unexpected 0 stream ID")]
+    ZeroStreamId,
+    #[error("Unexpected 0 window increment")]
+    ZeroWindowIncrement,
+    #[error("Unknown error type: {0}")]
+    UnknownErrorType(u32),
+}
 
 /// https://httpwg.org/specs/rfc7540.html#FrameTypes
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, FromPrimitive, ToPrimitive)]
@@ -57,7 +75,19 @@ pub enum ErrorType {
 }
 
 /// https://httpwg.org/specs/rfc7540.html#SettingValues
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, FromPrimitive, ToPrimitive)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    FromPrimitive,
+    ToPrimitive,
+    enum_map::Enum,
+)]
 #[repr(u16)]
 #[non_exhaustive]
 pub enum SettingsParameter {
