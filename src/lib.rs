@@ -1,6 +1,6 @@
 pub mod client;
 pub mod connection;
-pub mod enums;
 pub mod frame;
 pub mod stream;
+pub mod types;
 mod util;

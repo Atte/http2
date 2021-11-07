@@ -1,4 +1,8 @@
-use crate::{enums::*, frame::*, stream::Stream};
+use crate::{
+    frame::*,
+    stream::Stream,
+    types::{NonZeroStreamId, SettingsParameter},
+};
 use async_std::io;
 use async_std::{
     io::WriteExt,
@@ -9,24 +13,25 @@ use std::collections::HashMap;
 
 pub struct Connection {
     socket: TcpStream,
-    streams: HashMap<u32, Stream>,
+    streams: HashMap<NonZeroStreamId, Stream>,
     their_settings: HashMap<SettingsParameter, u32>,
 }
 
 impl Connection {
     pub async fn connect(addr: impl ToSocketAddrs) -> io::Result<Self> {
         let mut socket = TcpStream::connect(addr).await?;
+
         // client connection preface
         socket
             .write_all(b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n")
             .await?;
 
-        SettingsFrame::from(hashmap! {
+        let frame: Frame = hashmap! {
             SettingsParameter::HeaderTableSize => 0,
             SettingsParameter::EnablePush => 0,
-        })
-        .write_into(&mut socket)
-        .await?;
+        }
+        .into();
+        frame.write_into(&mut socket).await?;
 
         socket.flush().await?;
 
@@ -37,16 +42,17 @@ impl Connection {
         })
     }
 
-    pub async fn handle_frame(&mut self) -> io::Result<()> {
-        let frame = Frame::try_from_stream(&mut self.socket).await?;
-        match frame.typ {
-            FrameType::Settings => {
-                let frame: SettingsFrame = frame.try_into().expect("invalid settings frame");
-                self.their_settings = frame.into();
-                SettingsFrame::ack().write_into(&mut self.socket).await?;
+    pub async fn handle_frame(&mut self) -> anyhow::Result<()> {
+        let frame = Frame::read_from(&mut self.socket).await?;
+        match frame {
+            Frame::Settings { params, .. } => {
+                self.their_settings = params;
+                Frame::new_settings_ack()
+                    .write_into(&mut self.socket)
+                    .await?;
             }
             _ => {
-                eprintln!("Unhandled frame type: {:#?}", frame.typ);
+                eprintln!("Unhandled frame type: {:#?}", frame);
             }
         }
         Ok(())
