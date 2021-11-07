@@ -80,7 +80,8 @@ impl Stream {
             Frame::Ping { .. } => unreachable!("can't be sent to a stream"),
             Frame::GoAway { .. } => unreachable!("can't be sent to a stream"),
             Frame::WindowUpdate { increment, .. } => {
-                self.window_remaining.saturating_add(increment.get() as u64);
+                self.window_remaining +=
+                    self.window_remaining.saturating_add(increment.get() as u64);
             }
             Frame::Continuation { .. } => {}
         }

@@ -23,11 +23,14 @@ impl Connection {
             .write_all(b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n")
             .await?;
 
-        let frame: Frame = enum_map! {
-            SettingsParameter::HeaderTableSize => 0,
-            SettingsParameter::EnablePush => 0,
-            SettingsParameter::InitialWindowSize => MAX_WINDOW_INCREMENT.get(),
-        }
+        let frame: Frame = vec![
+            (SettingsParameter::HeaderTableSize, 0),
+            (SettingsParameter::EnablePush, 0),
+            (
+                SettingsParameter::InitialWindowSize,
+                MAX_WINDOW_INCREMENT.get(),
+            ),
+        ]
         .into();
         frame.write_into(&mut socket).await?;
 
@@ -48,13 +51,13 @@ impl Connection {
         })
     }
 
-    pub fn stream(&mut self, stream: NonZeroStreamId) -> &mut Stream {
+    fn stream(&mut self, stream: NonZeroStreamId) -> &mut Stream {
         self.streams
             .entry(stream)
             .or_insert_with(|| Stream::new(stream, self.window_remaining))
     }
 
-    pub async fn handle_frame(&mut self) -> anyhow::Result<()> {
+    async fn handle_frame(&mut self) -> anyhow::Result<()> {
         let frame = Frame::read_from(&mut self.socket).await?;
         let response = match frame {
             Frame::Data { stream, .. } => {
@@ -70,10 +73,12 @@ impl Connection {
             Frame::Priority { stream, .. } => self.stream(stream).on_frame(frame)?,
             Frame::ResetStream { stream, .. } => self.stream(stream).on_frame(frame)?,
             Frame::Settings { params, .. } => {
-                self.their_settings = params;
+                for (key, value) in params {
+                    self.their_settings[key] = value;
+                }
                 vec![Frame::Settings {
                     flags: SettingsFlags::ACK,
-                    params: EnumMap::default(),
+                    params: Vec::new(),
                 }]
             }
             Frame::PushPromise { stream, .. } => self.stream(stream).on_frame(frame)?,

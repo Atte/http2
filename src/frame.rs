@@ -1,6 +1,5 @@
 use crate::types::*;
 use async_std::io::{self, ReadExt, WriteExt};
-use enum_map::EnumMap;
 use num_traits::FromPrimitive;
 use std::num::NonZeroU32;
 
@@ -41,7 +40,7 @@ pub enum Frame {
     /// https://httpwg.org/specs/rfc7540.html#SETTINGS
     Settings {
         flags: SettingsFlags,
-        params: EnumMap<SettingsParameter, u32>,
+        params: Vec<(SettingsParameter, u32)>,
     },
     /// https://httpwg.org/specs/rfc7540.html#PUSH_PROMISE
     PushPromise {
@@ -164,7 +163,7 @@ impl Frame {
                 }
             }
             FrameType::Settings => {
-                let mut params = EnumMap::default();
+                let mut params = Vec::new();
                 for chunk in payload.chunks(2 + 4) {
                     // spec says to ignore unknown settings
                     if let Some(param) = SettingsParameter::from_u16(u16::from_be_bytes(
@@ -172,11 +171,14 @@ impl Frame {
                             .try_into()
                             .map_err(|_| FrameDecodeError::PayloadTooShort)?,
                     )) {
-                        params[param] = u32::from_be_bytes(
-                            chunk[2..=5]
-                                .try_into()
-                                .map_err(|_| FrameDecodeError::PayloadTooShort)?,
-                        );
+                        params.push((
+                            param,
+                            u32::from_be_bytes(
+                                chunk[2..=5]
+                                    .try_into()
+                                    .map_err(|_| FrameDecodeError::PayloadTooShort)?,
+                            ),
+                        ));
                     }
                 }
                 Self::Settings {
@@ -327,7 +329,7 @@ impl Frame {
             Self::Settings { params, .. } => {
                 let mut payload = Vec::with_capacity((2 + 4) * params.len());
                 for (key, value) in params.iter() {
-                    payload.extend((key as u16).to_be_bytes());
+                    payload.extend(((*key) as u16).to_be_bytes());
                     payload.extend(value.to_be_bytes());
                 }
                 payload
@@ -374,8 +376,8 @@ impl Frame {
     }
 }
 
-impl From<EnumMap<SettingsParameter, u32>> for Frame {
-    fn from(params: EnumMap<SettingsParameter, u32>) -> Self {
+impl From<Vec<(SettingsParameter, u32)>> for Frame {
+    fn from(params: Vec<(SettingsParameter, u32)>) -> Self {
         Self::Settings {
             flags: SettingsFlags::empty(),
             params,
