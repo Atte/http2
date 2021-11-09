@@ -3,7 +3,7 @@ use num_derive::{FromPrimitive, ToPrimitive};
 use std::num::NonZeroU32;
 
 // Safety: value is a const, that can't be zero
-pub const MAX_WINDOW_INCREMENT: NonZeroU32 = unsafe { NonZeroU32::new_unchecked(u32::MAX >> 1) };
+pub const U31_MAX: NonZeroU32 = unsafe { NonZeroU32::new_unchecked(u32::MAX >> 1) };
 
 pub type StreamId = u32;
 pub type NonZeroStreamId = std::num::NonZeroU32;
