@@ -15,6 +15,7 @@ pub enum Frame {
     Data {
         stream: NonZeroStreamId,
         flags: DataFlags,
+        flow_control_size: u32,
         data: Bytes,
     },
     /// https://httpwg.org/specs/rfc7540.html#HEADERS
@@ -111,6 +112,7 @@ impl Frame {
                 Self::Data {
                     stream: NonZeroStreamId::new(stream).ok_or(FrameDecodeError::ZeroStreamId)?,
                     flags,
+                    flow_control_size: length as u32,
                     data: if flags.contains(DataFlags::PADDED) {
                         remove_padding(&mut payload)
                     } else {
@@ -347,8 +349,9 @@ impl Frame {
         let flags = self.flags();
         let stream = self.stream();
         let payload = self.into_payload();
+        let length = payload.len().to_be_bytes();
 
-        buffer.put(&payload.len().to_be_bytes()[1..]);
+        buffer.put(&length[length.len() - 3..]);
         buffer.put_u8(typ.to_be());
         buffer.put_u8(flags.to_be());
         buffer.put(&stream.to_be_bytes()[..]);

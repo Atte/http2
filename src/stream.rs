@@ -1,6 +1,8 @@
 use crate::{connection::Response, frame::Frame, types::*};
+use anyhow::anyhow;
 use bytes::{BufMut, BytesMut};
 use log::warn;
+use std::num::NonZeroU32;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum StreamState {
@@ -50,19 +52,32 @@ impl Stream {
         header_decoder: &mut hpack::Decoder,
     ) -> anyhow::Result<Option<Response>> {
         Ok(match frame {
-            Frame::Data { .. } => {
+            Frame::Data {
+                flags,
+                flow_control_size,
+                data,
+                ..
+            } => {
                 // TODO: proper flow control
-                Frame::WindowUpdate {
-                    stream: self.id.get(),
-                    increment: U31_MAX,
+                if let Some(increment) = NonZeroU32::new(flow_control_size) {
+                    Frame::WindowUpdate {
+                        stream: self.id.get(),
+                        increment,
+                    }
+                    .into_bytes(send_buffer);
+                    Frame::WindowUpdate {
+                        stream: 0,
+                        increment,
+                    }
+                    .into_bytes(send_buffer);
                 }
-                .into_bytes(send_buffer);
-                Frame::WindowUpdate {
-                    stream: 0,
-                    increment: U31_MAX,
+
+                self.body_buffer.extend(data);
+                if flags.contains(DataFlags::END_STREAM) {
+                    Some(self.decode_response())
+                } else {
+                    None
                 }
-                .into_bytes(send_buffer);
-                None
             }
             Frame::Headers {
                 flags,

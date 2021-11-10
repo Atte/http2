@@ -65,6 +65,7 @@ impl Request {
                 Frame::Data {
                     stream: stream.id,
                     flags: DataFlags::END_STREAM,
+                    flow_control_size: self.body.len() as u32,
                     data: self.body,
                 }
                 .into_bytes(&mut buffer);
@@ -210,9 +211,20 @@ impl Connection {
                     })
                 };
 
+                /*
+                if write_buf.has_remaining() {
+                    trace!("write {:?}", write_buf);
+                }
+                */
+
                 tokio::select! {
                     res = reader.read_buf(&mut read_buf) => {
                         res.expect("read_buf");
+                        /*
+                        if read_buf.has_remaining() {
+                            trace!("read {:?}", read_buf);
+                        }
+                        */
                         loop {
                             if header.is_empty() {
                                 if let Some(new_header) = Frame::try_header_from_bytes(&mut read_buf) {
@@ -243,9 +255,13 @@ impl Connection {
                         res.expect("write_buf");
                     }
                     request = request_rx.recv(), if was_ready => {
-                        let request = request.expect("request_tx recv");
-                        trace!("{:#?}", request);
-                        request.into_bytes(&mut header_encoder, &mut streams, &mut write_buf);
+                        if let Some(request) = request {
+                            trace!("{:#?}", request);
+                            request.into_bytes(&mut header_encoder, &mut streams, &mut write_buf);
+                        } else {
+                            trace!("Closing connection...");
+                            return;
+                        }
                     }
                 }
             }
