@@ -3,7 +3,7 @@ use dashmap::DashMap;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 pub struct StreamCoordinator {
-    id: AtomicU32,
+    client_id: AtomicU32,
     streams: DashMap<NonZeroStreamId, Stream>,
 }
 
@@ -13,18 +13,10 @@ impl StreamCoordinator {
         F: FnOnce(&mut Stream) -> T,
     {
         // TODO: initial window size
-        let mut stream = self.streams.entry(id).or_insert_with(|| {
-            self.id
-                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |max_id| {
-                    if id.get() >= max_id {
-                        Some(id.get() + 1)
-                    } else {
-                        None
-                    }
-                })
-                .ok();
-            Stream::new(id, 65_535)
-        });
+        let mut stream = self
+            .streams
+            .entry(id)
+            .or_insert_with(|| Stream::new(id, 65_535));
         f(stream.value_mut())
     }
 
@@ -32,7 +24,7 @@ impl StreamCoordinator {
     where
         F: FnOnce(&mut Stream) -> T,
     {
-        let id = NonZeroStreamId::new(self.id.fetch_add(1, Ordering::SeqCst))
+        let id = NonZeroStreamId::new(self.client_id.fetch_add(2, Ordering::SeqCst))
             .expect("stream ID wrapped");
         self.with_stream(id, f)
     }
@@ -41,7 +33,7 @@ impl StreamCoordinator {
 impl Default for StreamCoordinator {
     fn default() -> Self {
         Self {
-            id: AtomicU32::new(1),
+            client_id: AtomicU32::new(3),
             streams: DashMap::new(),
         }
     }

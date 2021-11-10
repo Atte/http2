@@ -1,12 +1,12 @@
-use crate::{socket::Socket, types::*};
-use anyhow::anyhow;
+use crate::types::*;
+use bytes::{Buf, BufMut, Bytes};
 use log::trace;
 use num_traits::FromPrimitive;
-use std::{io::Write, num::NonZeroU32, sync::Mutex};
+use std::num::NonZeroU32;
 
-fn remove_padding(data: Vec<u8>) -> Vec<u8> {
-    let size = u8::from_be(data[0]) as usize;
-    data[1..(data.len() - size)].to_vec()
+fn remove_padding(data: &mut Bytes) -> Bytes {
+    let size = u8::from_be(data.get_u8()) as usize;
+    data.copy_to_bytes(data.len() - size - 1)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -15,16 +15,16 @@ pub enum Frame {
     Data {
         stream: NonZeroStreamId,
         flags: DataFlags,
-        data: Vec<u8>,
+        data: Bytes,
     },
     /// https://httpwg.org/specs/rfc7540.html#HEADERS
     Headers {
         stream: NonZeroStreamId,
         flags: HeadersFlags,
-        dependency: StreamId,
-        exclusive_dependency: bool,
-        weight: u8,
-        fragment: Vec<u8>,
+        dependency: Option<StreamId>,
+        exclusive_dependency: Option<bool>,
+        weight: Option<u8>,
+        fragment: Bytes,
     },
     /// https://httpwg.org/specs/rfc7540.html#PRIORITY
     Priority {
@@ -48,15 +48,15 @@ pub enum Frame {
         stream: NonZeroStreamId,
         flags: PushPromiseFlags,
         promised_stream: u32,
-        fragment: Vec<u8>,
+        fragment: Bytes,
     },
     /// https://httpwg.org/specs/rfc7540.html#PING
-    Ping { flags: PingFlags, data: Vec<u8> },
+    Ping { flags: PingFlags, data: Bytes },
     /// https://httpwg.org/specs/rfc7540.html#GOAWAY
     GoAway {
         last_stream: StreamId,
         error: ErrorType,
-        debug: Vec<u8>,
+        debug: Bytes,
     },
     /// https://httpwg.org/specs/rfc7540.html#WINDOW_UPDATE
     WindowUpdate {
@@ -67,194 +67,161 @@ pub enum Frame {
     Continuation {
         stream: NonZeroStreamId,
         flags: ContinuationFlags,
-        fragment: Vec<u8>,
+        fragment: Bytes,
     },
 }
 
 impl Frame {
-    pub fn read_from(socket: &Mutex<Socket>) -> anyhow::Result<Option<Self>> {
-        if let Some(header) = socket
-            .lock()
-            .map_err(|_| anyhow!("socket lock"))?
-            .read_exact_maybe(9)?
-        {
-            let length = u32::from_be_bytes(
-                [&[0u8], &header[0..=2]]
-                    .concat()
-                    .try_into()
-                    .map_err(|_| FrameDecodeError::PayloadTooShort)?,
-            );
+    pub fn try_header_from_bytes(buffer: &mut impl Buf) -> Option<Bytes> {
+        if buffer.remaining() >= 9 {
+            Some(buffer.copy_to_bytes(9))
+        } else {
+            None
+        }
+    }
 
-            let payload = socket
-                .lock()
-                .map_err(|_| anyhow!("socket lock"))?
-                .read_exact_blocking(length as usize)?;
+    pub fn try_read_with_header(
+        header: &Bytes,
+        buffer: &mut impl Buf,
+    ) -> anyhow::Result<Option<Self>> {
+        let length = u32::from_be_bytes(
+            [&[0_u8], &header[0..=2]]
+                .concat()
+                .try_into()
+                .map_err(|_| FrameDecodeError::PayloadTooShort)?,
+        ) as usize;
 
-            let typ =
-                FrameType::from_u8(u8::from_be(header[3])).ok_or(FrameDecodeError::UnknownType)?;
-            let flags = u8::from_be(header[4]);
-            let stream = u32::from_be_bytes(
-                header[5..=8]
-                    .try_into()
-                    .map_err(|_| FrameDecodeError::PayloadTooShort)?,
-            ) & (u32::MAX >> 1);
+        if buffer.remaining() < length {
+            return Ok(None);
+        }
+        let mut payload = buffer.copy_to_bytes(length);
 
-            let frame = match typ {
-                FrameType::Data => {
-                    let flags = DataFlags::from_bits_truncate(flags);
-                    Self::Data {
-                        stream: NonZeroStreamId::new(stream)
-                            .ok_or(FrameDecodeError::ZeroStreamId)?,
-                        flags,
-                        data: if flags.contains(DataFlags::PADDED) {
-                            remove_padding(payload)
-                        } else {
-                            payload
-                        },
-                    }
-                }
-                FrameType::Headers => {
-                    let flags = HeadersFlags::from_bits_truncate(flags);
-                    let payload = if flags.contains(HeadersFlags::PADDED) {
-                        remove_padding(payload)
+        let typ =
+            FrameType::from_u8(u8::from_be(header[3])).ok_or(FrameDecodeError::UnknownType)?;
+        let flags = u8::from_be(header[4]);
+        let stream = u32::from_be_bytes(
+            header[5..=8]
+                .try_into()
+                .map_err(|_| FrameDecodeError::PayloadTooShort)?,
+        ) & (u32::MAX >> 1);
+
+        let frame = match typ {
+            FrameType::Data => {
+                let flags = DataFlags::from_bits_truncate(flags);
+                Self::Data {
+                    stream: NonZeroStreamId::new(stream).ok_or(FrameDecodeError::ZeroStreamId)?,
+                    flags,
+                    data: if flags.contains(DataFlags::PADDED) {
+                        remove_padding(&mut payload)
                     } else {
                         payload
-                    };
-                    let stream =
-                        NonZeroStreamId::new(stream).ok_or(FrameDecodeError::ZeroStreamId)?;
-                    if flags.contains(HeadersFlags::PRIORITY) {
-                        Self::Headers {
-                            stream,
-                            flags,
-                            dependency: u32::from_be_bytes(
-                                payload[0..=3]
+                    },
+                }
+            }
+            FrameType::Headers => {
+                let flags = HeadersFlags::from_bits_truncate(flags);
+                let mut payload = if flags.contains(HeadersFlags::PADDED) {
+                    remove_padding(&mut payload)
+                } else {
+                    payload
+                };
+                let stream = NonZeroStreamId::new(stream).ok_or(FrameDecodeError::ZeroStreamId)?;
+                if flags.contains(HeadersFlags::PRIORITY) {
+                    let dependency = payload.get_u32();
+                    Self::Headers {
+                        stream,
+                        flags,
+                        dependency: Some(dependency & (u32::MAX >> 1)),
+                        exclusive_dependency: Some((dependency >> 31) != 0),
+                        weight: Some(payload.get_u8()),
+                        fragment: payload,
+                    }
+                } else {
+                    Self::Headers {
+                        stream,
+                        flags,
+                        dependency: None,
+                        exclusive_dependency: None,
+                        weight: None,
+                        fragment: payload,
+                    }
+                }
+            }
+            FrameType::Priority => Self::Priority {
+                stream: NonZeroStreamId::new(stream).ok_or(FrameDecodeError::ZeroStreamId)?,
+                dependency: u32::from_be_bytes(
+                    payload[0..=3]
+                        .try_into()
+                        .map_err(|_| FrameDecodeError::PayloadTooShort)?,
+                ) & (u32::MAX >> 1),
+                exclusive_dependency: payload[0] & 0b10000_u8 != 0,
+                weight: u8::from_be(payload[4]),
+            },
+            FrameType::ResetStream => Self::ResetStream {
+                stream: NonZeroStreamId::new(stream).ok_or(FrameDecodeError::ZeroStreamId)?,
+                error: ErrorType::from_u32(payload.get_u32())
+                    .ok_or(FrameDecodeError::UnknownErrorType)?,
+            },
+            FrameType::Settings => {
+                let mut params = Vec::new();
+                for chunk in payload.chunks(2 + 4) {
+                    // spec says to ignore unknown settings
+                    if let Some(param) = SettingsParameter::from_u16(u16::from_be_bytes(
+                        chunk[0..=1]
+                            .try_into()
+                            .map_err(|_| FrameDecodeError::PayloadTooShort)?,
+                    )) {
+                        params.push((
+                            param,
+                            u32::from_be_bytes(
+                                chunk[2..=5]
                                     .try_into()
                                     .map_err(|_| FrameDecodeError::PayloadTooShort)?,
-                            ) & (u32::MAX >> 1),
-                            exclusive_dependency: payload[0] & 0b10000u8 != 0,
-                            weight: u8::from_be(payload[4]),
-                            fragment: payload[5..].to_vec(),
-                        }
+                            ),
+                        ));
+                    }
+                }
+                Self::Settings {
+                    flags: SettingsFlags::from_bits_truncate(flags),
+                    params,
+                }
+            }
+            FrameType::PushPromise => {
+                let flags = PushPromiseFlags::from_bits_truncate(flags);
+                Self::PushPromise {
+                    stream: NonZeroStreamId::new(stream).ok_or(FrameDecodeError::ZeroStreamId)?,
+                    flags,
+                    promised_stream: payload.get_u32() & (u32::MAX >> 1),
+                    fragment: if flags.contains(PushPromiseFlags::PADDED) {
+                        remove_padding(&mut payload)
                     } else {
-                        Self::Headers {
-                            stream,
-                            flags,
-                            dependency: 0,
-                            exclusive_dependency: false,
-                            weight: 0,
-                            fragment: payload,
-                        }
-                    }
+                        payload
+                    },
                 }
-                FrameType::Priority => Self::Priority {
-                    stream: NonZeroStreamId::new(stream).ok_or(FrameDecodeError::ZeroStreamId)?,
-                    dependency: u32::from_be_bytes(
-                        payload[0..=3]
-                            .try_into()
-                            .map_err(|_| FrameDecodeError::PayloadTooShort)?,
-                    ) & (u32::MAX >> 1),
-                    exclusive_dependency: payload[0] & 0b10000u8 != 0,
-                    weight: u8::from_be(payload[4]),
-                },
-                FrameType::ResetStream => {
-                    let error = u32::from_be_bytes(
-                        payload[0..=3]
-                            .try_into()
-                            .map_err(|_| FrameDecodeError::PayloadTooShort)?,
-                    );
-                    Self::ResetStream {
-                        stream: NonZeroStreamId::new(stream)
-                            .ok_or(FrameDecodeError::ZeroStreamId)?,
-                        error: ErrorType::from_u32(error)
-                            .ok_or(FrameDecodeError::UnknownErrorType(error))?,
-                    }
-                }
-                FrameType::Settings => {
-                    let mut params = Vec::new();
-                    for chunk in payload.chunks(2 + 4) {
-                        // spec says to ignore unknown settings
-                        if let Some(param) = SettingsParameter::from_u16(u16::from_be_bytes(
-                            chunk[0..=1]
-                                .try_into()
-                                .map_err(|_| FrameDecodeError::PayloadTooShort)?,
-                        )) {
-                            params.push((
-                                param,
-                                u32::from_be_bytes(
-                                    chunk[2..=5]
-                                        .try_into()
-                                        .map_err(|_| FrameDecodeError::PayloadTooShort)?,
-                                ),
-                            ));
-                        }
-                    }
-                    Self::Settings {
-                        flags: SettingsFlags::from_bits_truncate(flags),
-                        params,
-                    }
-                }
-                FrameType::PushPromise => {
-                    let flags = PushPromiseFlags::from_bits_truncate(flags);
-                    Self::PushPromise {
-                        stream: NonZeroStreamId::new(stream)
-                            .ok_or(FrameDecodeError::ZeroStreamId)?,
-                        flags,
-                        promised_stream: u32::from_be_bytes(
-                            payload[0..=3]
-                                .try_into()
-                                .map_err(|_| FrameDecodeError::PayloadTooShort)?,
-                        ) & (u32::MAX >> 1),
-                        fragment: if flags.contains(PushPromiseFlags::PADDED) {
-                            remove_padding(payload)
-                        } else {
-                            payload
-                        }[4..]
-                            .to_vec(),
-                    }
-                }
-                FrameType::Ping => Self::Ping {
-                    flags: PingFlags::from_bits_truncate(flags),
-                    data: payload,
-                },
-                FrameType::GoAway => {
-                    let error = u32::from_be_bytes(
-                        payload[4..=7]
-                            .try_into()
-                            .map_err(|_| FrameDecodeError::PayloadTooShort)?,
-                    );
-                    Self::GoAway {
-                        last_stream: u32::from_be_bytes(
-                            payload[0..=3]
-                                .try_into()
-                                .map_err(|_| FrameDecodeError::PayloadTooShort)?,
-                        ) & (u32::MAX >> 1),
-                        error: ErrorType::from_u32(error)
-                            .ok_or(FrameDecodeError::UnknownErrorType(error))?,
-                        debug: payload[8..].to_vec(),
-                    }
-                }
-                FrameType::WindowUpdate => Self::WindowUpdate {
-                    stream,
-                    increment: NonZeroU32::new(
-                        u32::from_be_bytes(
-                            payload[0..=3]
-                                .try_into()
-                                .map_err(|_| FrameDecodeError::PayloadTooShort)?,
-                        ) & (u32::MAX >> 1),
-                    )
+            }
+            FrameType::Ping => Self::Ping {
+                flags: PingFlags::from_bits_truncate(flags),
+                data: payload,
+            },
+            FrameType::GoAway => Self::GoAway {
+                last_stream: payload.get_u32() & (u32::MAX >> 1),
+                error: ErrorType::from_u32(payload.get_u32())
+                    .ok_or(FrameDecodeError::UnknownErrorType)?,
+                debug: payload,
+            },
+            FrameType::WindowUpdate => Self::WindowUpdate {
+                stream,
+                increment: NonZeroU32::new(payload.get_u32() & (u32::MAX >> 1))
                     .ok_or(FrameDecodeError::ZeroWindowIncrement)?,
-                },
-                FrameType::Continuation => Self::Continuation {
-                    stream: NonZeroStreamId::new(stream).ok_or(FrameDecodeError::ZeroStreamId)?,
-                    flags: ContinuationFlags::from_bits_truncate(flags),
-                    fragment: payload,
-                },
-            };
-            trace!("receive: {:#?}", frame);
-            Ok(Some(frame))
-        } else {
-            Ok(None)
-        }
+            },
+            FrameType::Continuation => Self::Continuation {
+                stream: NonZeroStreamId::new(stream).ok_or(FrameDecodeError::ZeroStreamId)?,
+                flags: ContinuationFlags::from_bits_truncate(flags),
+                fragment: payload,
+            },
+        };
+        trace!("[RECV] {:#?}", frame);
+        Ok(Some(frame))
     }
 
     fn typ(&self) -> FrameType {
@@ -274,16 +241,14 @@ impl Frame {
 
     fn stream(&self) -> StreamId {
         match self {
-            Self::Data { stream, .. } => stream.get(),
-            Self::Headers { stream, .. } => stream.get(),
-            Self::Priority { stream, .. } => stream.get(),
-            Self::ResetStream { stream, .. } => stream.get(),
-            Self::Settings { .. } => 0,
-            Self::PushPromise { stream, .. } => stream.get(),
-            Self::Ping { .. } => 0,
-            Self::GoAway { .. } => 0,
+            Self::Data { stream, .. }
+            | Self::Headers { stream, .. }
+            | Self::Priority { stream, .. }
+            | Self::ResetStream { stream, .. }
+            | Self::PushPromise { stream, .. }
+            | Self::Continuation { stream, .. } => stream.get(),
             Self::WindowUpdate { stream, .. } => *stream,
-            Self::Continuation { stream, .. } => stream.get(),
+            Self::Settings { .. } | Self::Ping { .. } | Self::GoAway { .. } => 0,
         }
     }
 
@@ -291,20 +256,20 @@ impl Frame {
         match self {
             Self::Data { flags, .. } => flags.bits(),
             Self::Headers { flags, .. } => flags.bits(),
-            Self::Priority { .. } => 0,
-            Self::ResetStream { .. } => 0,
             Self::Settings { flags, .. } => flags.bits(),
             Self::PushPromise { flags, .. } => flags.bits(),
             Self::Ping { flags, .. } => flags.bits(),
-            Self::GoAway { .. } => 0,
-            Self::WindowUpdate { .. } => 0,
             Self::Continuation { flags, .. } => flags.bits(),
+            Self::Priority { .. }
+            | Self::ResetStream { .. }
+            | Self::GoAway { .. }
+            | Self::WindowUpdate { .. } => 0,
         }
     }
 
-    fn into_payload(self) -> Vec<u8> {
+    fn into_payload(self) -> Bytes {
         match self {
-            Self::Data { data, .. } => data,
+            Self::Data { data, .. } | Self::Ping { data, .. } => data,
             Self::Headers {
                 flags,
                 dependency,
@@ -314,13 +279,16 @@ impl Frame {
                 ..
             } => {
                 if flags.contains(HeadersFlags::PRIORITY) {
-                    let mut payload: Vec<u8> = dependency.to_be_bytes().to_vec();
-                    if exclusive_dependency {
-                        payload[0] &= 0b10000u8;
+                    let mut payload: Vec<u8> = dependency
+                        .expect("missing header dependency")
+                        .to_be_bytes()
+                        .to_vec();
+                    if exclusive_dependency.expect("missing header exclusive_dependency") {
+                        payload[0] &= 0b10000_u8;
                     }
-                    payload.push(weight.to_be());
+                    payload.push(weight.expect("missing header weight").to_be());
                     payload.extend(fragment);
-                    payload
+                    payload.into()
                 } else {
                     fragment
                 }
@@ -333,19 +301,19 @@ impl Frame {
             } => {
                 let mut payload: Vec<u8> = dependency.to_be_bytes().to_vec();
                 if exclusive_dependency {
-                    payload[0] &= 0b10000u8;
+                    payload[0] &= 0b10000_u8;
                 }
                 payload.push(weight.to_be());
-                payload
+                payload.into()
             }
-            Self::ResetStream { error, .. } => (error as u32).to_be_bytes().to_vec(),
+            Self::ResetStream { error, .. } => (error as u32).to_be_bytes().to_vec().into(),
             Self::Settings { params, .. } => {
                 let mut payload = Vec::with_capacity((2 + 4) * params.len());
-                for (key, value) in params.iter() {
-                    payload.extend(((*key) as u16).to_be_bytes());
+                for (key, value) in params {
+                    payload.extend((key as u16).to_be_bytes());
                     payload.extend(value.to_be_bytes());
                 }
-                payload
+                payload.into()
             }
             Self::PushPromise {
                 promised_stream,
@@ -354,9 +322,8 @@ impl Frame {
             } => {
                 let mut payload = promised_stream.to_be_bytes().to_vec();
                 payload.extend(fragment);
-                payload
+                payload.into()
             }
-            Self::Ping { data, .. } => data,
             Self::GoAway {
                 last_stream,
                 error,
@@ -366,29 +333,26 @@ impl Frame {
                 let mut payload = last_stream.to_be_bytes().to_vec();
                 payload.extend((error as u32).to_be_bytes());
                 payload.extend(debug);
-                payload
+                payload.into()
             }
-            Self::WindowUpdate { increment, .. } => increment.get().to_be_bytes().to_vec(),
+            Self::WindowUpdate { increment, .. } => increment.get().to_be_bytes().to_vec().into(),
             Self::Continuation { fragment, .. } => fragment,
         }
     }
 
-    pub fn write_into(self, writable: &Mutex<impl Write>) -> anyhow::Result<()> {
-        trace!("send: {:#?}", self);
+    pub fn into_bytes(self, buffer: &mut impl BufMut) {
+        trace!("[SEND] {:#?}", self);
 
         let typ = self.typ() as u8;
         let flags = self.flags();
         let stream = self.stream();
         let payload = self.into_payload();
 
-        let mut writable = writable.lock().map_err(|_| anyhow!("writable lock"))?;
-        writable.write_all(&payload.len().to_be_bytes()[1..])?;
-        writable.write_all(&[typ.to_be(), flags.to_be()])?;
-        writable.write_all(&stream.to_be_bytes())?;
-        writable.write_all(&payload)?;
-        writable.flush()?;
-
-        Ok(())
+        buffer.put(&payload.len().to_be_bytes()[1..]);
+        buffer.put_u8(typ.to_be());
+        buffer.put_u8(flags.to_be());
+        buffer.put(&stream.to_be_bytes()[..]);
+        buffer.put(&payload[..]);
     }
 }
 

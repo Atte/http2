@@ -18,8 +18,8 @@ pub enum FrameDecodeError {
     ZeroStreamId,
     #[error("Unexpected 0 window increment")]
     ZeroWindowIncrement,
-    #[error("Unknown error type: {0}")]
-    UnknownErrorType(u32),
+    #[error("Unknown error type")]
+    UnknownErrorType,
 }
 
 /// https://httpwg.org/specs/rfc7540.html#FrameTypes

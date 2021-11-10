@@ -1,6 +1,6 @@
 use crate::{connection::Response, frame::Frame, types::*};
+use bytes::{BufMut, BytesMut};
 use log::warn;
-use std::{collections::HashMap, io::Write, sync::Mutex};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum StreamState {
@@ -15,35 +15,38 @@ pub enum StreamState {
 
 pub struct Stream {
     pub id: NonZeroStreamId,
-    pub request_headers: HashMap<String, String>,
+    pub request_headers: Vec<(String, String)>,
     window_remaining: u64,
     state: StreamState,
-    dependency: StreamId,
-    weight: u8,
-    headers_buffer: Vec<u8>,
-    body_buffer: Vec<u8>,
-    response_headers: HashMap<String, String>,
+    dependency: Option<StreamId>,
+    exclusive_dependency: Option<bool>,
+    weight: Option<u8>,
+    headers_buffer: BytesMut,
+    body_buffer: BytesMut,
+    response_headers: Vec<(String, String)>,
 }
 
 impl Stream {
+    #[must_use]
     pub fn new(id: NonZeroStreamId, window_remaining: u64) -> Self {
         Self {
             id,
-            request_headers: HashMap::new(),
+            request_headers: Vec::new(),
             window_remaining,
             state: StreamState::Idle,
-            dependency: 0,
-            weight: 0,
-            headers_buffer: Vec::new(),
-            body_buffer: Vec::new(),
-            response_headers: HashMap::new(),
+            dependency: None,
+            exclusive_dependency: None,
+            weight: None,
+            headers_buffer: BytesMut::with_capacity(16_384 * 2),
+            body_buffer: BytesMut::with_capacity(16_384 * 2),
+            response_headers: Vec::new(),
         }
     }
 
     pub fn on_frame(
         &mut self,
         frame: Frame,
-        writable: &Mutex<impl Write>,
+        send_buffer: &mut impl BufMut,
         header_decoder: &mut hpack::Decoder,
     ) -> anyhow::Result<Option<Response>> {
         Ok(match frame {
@@ -53,17 +56,18 @@ impl Stream {
                     stream: self.id.get(),
                     increment: U31_MAX,
                 }
-                .write_into(writable)?;
+                .into_bytes(send_buffer);
                 Frame::WindowUpdate {
                     stream: 0,
                     increment: U31_MAX,
                 }
-                .write_into(writable)?;
+                .into_bytes(send_buffer);
                 None
             }
             Frame::Headers {
                 flags,
                 dependency,
+                exclusive_dependency,
                 weight,
                 fragment,
                 ..
@@ -76,6 +80,7 @@ impl Stream {
 
                 if flags.contains(HeadersFlags::PRIORITY) {
                     self.dependency = dependency;
+                    self.exclusive_dependency = exclusive_dependency;
                     self.weight = weight;
                 }
 
@@ -105,10 +110,14 @@ impl Stream {
                 }
             }
             Frame::Priority {
-                dependency, weight, ..
+                dependency,
+                exclusive_dependency,
+                weight,
+                ..
             } => {
-                self.dependency = dependency;
-                self.weight = weight;
+                self.dependency = Some(dependency);
+                self.exclusive_dependency = Some(exclusive_dependency);
+                self.weight = Some(weight);
                 None
             }
             Frame::ResetStream { error, .. } => {
@@ -116,7 +125,6 @@ impl Stream {
                 self.state = StreamState::Closed;
                 None
             }
-            Frame::Settings { .. } => unreachable!("can't be sent to a stream"),
             Frame::PushPromise {
                 promised_stream, ..
             } => {
@@ -126,14 +134,13 @@ impl Stream {
                         .ok_or(FrameDecodeError::ZeroStreamId)?,
                     error: ErrorType::RefusedStream,
                 }
-                .write_into(writable)?;
+                .into_bytes(send_buffer);
                 None
             }
-            Frame::Ping { .. } => unreachable!("can't be sent to a stream"),
-            Frame::GoAway { .. } => unreachable!("can't be sent to a stream"),
             Frame::WindowUpdate { increment, .. } => {
-                self.window_remaining +=
-                    self.window_remaining.saturating_add(increment.get() as u64);
+                self.window_remaining += self
+                    .window_remaining
+                    .saturating_add(u64::from(increment.get()));
                 None
             }
             Frame::Continuation {
@@ -151,26 +158,29 @@ impl Stream {
                     None
                 }
             }
+            Frame::Settings { .. } | Frame::Ping { .. } | Frame::GoAway { .. } => {
+                unreachable!("can't be sent to a stream");
+            }
         })
     }
 
     fn decode_headers(&mut self, header_decoder: &mut hpack::Decoder) {
         header_decoder
             .decode_with_cb(&self.headers_buffer, |key, value| {
-                self.response_headers.insert(
+                self.response_headers.push((
                     String::from_utf8_lossy(&key).to_string(),
                     String::from_utf8_lossy(&value).to_string(),
-                );
+                ));
             })
             .expect("decode_with_cb");
         self.headers_buffer.clear();
     }
 
-    fn decode_response(&self) -> Response {
+    fn decode_response(&mut self) -> Response {
         Response {
             request_headers: self.request_headers.clone(),
             headers: self.response_headers.clone(),
-            body: self.body_buffer.clone(),
+            body: self.body_buffer.clone().freeze(),
         }
     }
 }

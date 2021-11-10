@@ -1,31 +1,39 @@
 use crate::connection::{Connection, Response};
 use anyhow::anyhow;
-use log::trace;
-use maplit::hashmap;
-use rustls::{OwnedTrustAnchor, RootCertStore};
 use std::sync::Arc;
+use tokio_rustls::{
+    rustls::{ClientConfig, OwnedTrustAnchor, RootCertStore},
+    TlsConnector,
+};
 use url::Url;
 
 pub struct Client {
-    rustls_config: Arc<rustls::ClientConfig>,
+    connector: TlsConnector,
 }
 
 impl Client {
-    pub fn get(&self, url: Url) -> anyhow::Result<Response> {
-        let headers = hashmap! {
-            ":method".to_owned() => "GET".to_owned(),
-            ":scheme".to_owned() => url.scheme().to_owned(),
-            ":authority".to_owned() => format!(
-                "{}:{}",
-                url.host_str().ok_or_else(|| anyhow!("No host in URL"))?,
-                url.port_or_known_default().ok_or_else(|| anyhow!("No port for URL"))?,
+    pub async fn get(&self, url: Url) -> anyhow::Result<Response> {
+        let headers = vec![
+            (":method".to_owned(), "GET".to_owned()),
+            (":scheme".to_owned(), url.scheme().to_owned()),
+            (":path".to_owned(), url.path().to_owned()),
+            (
+                ":authority".to_owned(),
+                if let Some(port) = url.port() {
+                    format!(
+                        "{}:{}",
+                        url.host_str().ok_or_else(|| anyhow!("No host in URL"))?,
+                        port,
+                    )
+                } else {
+                    url.host_str()
+                        .ok_or_else(|| anyhow!("No host in URL"))?
+                        .to_owned()
+                },
             ),
-            ":path".to_owned() => url.path().to_owned(),
-        };
-        trace!("GET {} {:#?}", url, headers);
-        let connection = Connection::connect(url, self.rustls_config.clone())?;
-        let response = connection.request(headers, Vec::new());
-        trace!("Response: {:#?}", response);
+        ];
+        let connection = Connection::connect(url, &self.connector).await?;
+        let response = connection.request(headers, Vec::new()).await?;
         Ok(response)
     }
 }
@@ -40,13 +48,13 @@ impl Default for Client {
                 ta.name_constraints,
             )
         }));
-        let mut config = rustls::ClientConfig::builder()
+        let mut config = ClientConfig::builder()
             .with_safe_defaults()
             .with_root_certificates(root_store)
             .with_no_client_auth();
         config.alpn_protocols = vec![vec![b'h', b'2']];
         Self {
-            rustls_config: Arc::new(config),
+            connector: Arc::new(config).into(),
         }
     }
 }
