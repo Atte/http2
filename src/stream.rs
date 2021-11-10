@@ -16,7 +16,7 @@ pub enum StreamState {
 
 pub struct Stream {
     pub id: NonZeroStreamId,
-    pub request_headers: Vec<(String, String)>,
+    pub request_id: usize,
     window_remaining: u64,
     state: StreamState,
     dependency: Option<StreamId>,
@@ -32,7 +32,7 @@ impl Stream {
     pub fn new(id: NonZeroStreamId, window_remaining: u64) -> Self {
         Self {
             id,
-            request_headers: Vec::new(),
+            request_id: 0,
             window_remaining,
             state: StreamState::Idle,
             dependency: None,
@@ -192,7 +192,7 @@ impl Stream {
 
     fn decode_response(&mut self) -> Response {
         Response {
-            request_headers: self.request_headers.clone(),
+            request_id: self.request_id,
             headers: self.response_headers.clone(),
             body: self.body_buffer.clone().freeze(),
         }

@@ -3,6 +3,7 @@ use anyhow::anyhow;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use enum_map::enum_map;
 use log::{debug, error, trace, warn};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::{
     io::{split, AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
@@ -14,15 +15,18 @@ use tokio::{
 use tokio_rustls::TlsConnector;
 use url::Url;
 
+static REQUEST_ID: AtomicUsize = AtomicUsize::new(1);
+
 #[derive(Debug, Clone)]
 pub struct Request {
+    pub id: usize,
     pub headers: Vec<(String, String)>,
     pub body: Bytes,
 }
 
 #[derive(Debug, Clone)]
 pub struct Response {
-    pub request_headers: Vec<(String, String)>,
+    pub request_id: usize,
     pub headers: Vec<(String, String)>,
     pub body: Bytes,
 }
@@ -46,8 +50,7 @@ impl Request {
                     .map(|(key, value)| (key.as_bytes(), value.as_bytes())),
             )
             .into();
-        streams.with_new_stream(|mut stream| {
-            stream.request_headers = self.headers;
+        streams.with_new_stream(|stream| {
             Frame::Headers {
                 stream: stream.id,
                 flags: if self.body.is_empty() {
@@ -278,10 +281,13 @@ impl Connection {
         headers: Vec<(String, String)>,
         body: impl Into<Bytes>,
     ) -> anyhow::Result<Response> {
+        let id = REQUEST_ID.fetch_add(1, Ordering::SeqCst);
+
         let mut receiver = self.responses.subscribe();
 
         self.request_queue
             .send(Request {
+                id,
                 headers: headers.clone(),
                 body: body.into(),
             })
@@ -289,7 +295,7 @@ impl Connection {
 
         loop {
             let response = receiver.recv().await?;
-            if response.request_headers == headers {
+            if response.request_id == id {
                 return Ok(response);
             }
         }
