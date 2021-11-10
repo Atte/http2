@@ -1,5 +1,4 @@
 use crate::{connection::Response, frame::Frame, types::*};
-use anyhow::anyhow;
 use bytes::{BufMut, BytesMut};
 use log::warn;
 use std::num::NonZeroU32;
