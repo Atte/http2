@@ -1,7 +1,11 @@
-pub mod client;
-pub mod connection;
-pub mod frame;
-pub mod stream;
-pub mod stream_coordinator;
-pub mod types;
-mod util;
+mod client;
+mod connection;
+mod flags;
+mod frame;
+mod stream;
+mod stream_coordinator;
+mod types;
+
+pub use client::Client;
+pub use connection::Response;
+pub use url::Url;

@@ -1,32 +1,30 @@
 use crate::{stream::Stream, types::*};
-use dashmap::DashMap;
-use std::sync::atomic::{AtomicU32, Ordering};
+use derivative::Derivative;
+use std::{
+    collections::HashMap,
+    sync::atomic::{AtomicU32, Ordering},
+};
 
+#[derive(Derivative)]
+#[derivative(Debug)]
 pub struct StreamCoordinator {
     client_id: AtomicU32,
-    streams: DashMap<NonZeroStreamId, Stream>,
+    #[derivative(Debug = "ignore")]
+    streams: HashMap<NonZeroStreamId, Stream>,
 }
 
 impl StreamCoordinator {
-    pub fn with_stream<T, F>(&self, id: NonZeroStreamId, f: F) -> T
-    where
-        F: FnOnce(&mut Stream) -> T,
-    {
+    pub fn get_mut(&mut self, id: NonZeroStreamId) -> &mut Stream {
         // TODO: initial window size
-        let mut stream = self
-            .streams
+        self.streams
             .entry(id)
-            .or_insert_with(|| Stream::new(id, 65_535));
-        f(stream.value_mut())
+            .or_insert_with(|| Stream::new(id, 65_535))
     }
 
-    pub fn with_new_stream<T, F>(&self, f: F) -> T
-    where
-        F: FnOnce(&mut Stream) -> T,
-    {
+    pub fn create_mut(&mut self) -> &mut Stream {
         let id = NonZeroStreamId::new(self.client_id.fetch_add(2, Ordering::SeqCst))
             .expect("stream ID wrapped");
-        self.with_stream(id, f)
+        self.get_mut(id)
     }
 }
 
@@ -34,7 +32,7 @@ impl Default for StreamCoordinator {
     fn default() -> Self {
         Self {
             client_id: AtomicU32::new(3),
-            streams: DashMap::new(),
+            streams: HashMap::new(),
         }
     }
 }

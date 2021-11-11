@@ -1,5 +1,5 @@
 use clap::{crate_version, App, Arg};
-use http2::client::Client;
+use http2::Client;
 use url::Url;
 
 #[tokio::main]

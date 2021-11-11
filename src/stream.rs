@@ -1,10 +1,12 @@
-use crate::{connection::Response, frame::Frame, types::*};
-use bytes::{BufMut, BytesMut};
-use log::warn;
+use crate::{connection::*, flags::*, frame::*, types::*};
+use anyhow::anyhow;
+use bytes::BytesMut;
+use derivative::Derivative;
+use log::{trace, warn};
 use std::num::NonZeroU32;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum StreamState {
+enum StreamState {
     Idle,
     ReservedLocal,
     ReservedRemote,
@@ -14,11 +16,20 @@ pub enum StreamState {
     Closed,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+enum Continuing {
+    Headers,
+    PushPromise,
+}
+
+#[derive(Derivative)]
+#[derivative(Debug)]
 pub struct Stream {
     pub id: NonZeroStreamId,
     pub request_id: usize,
     window_remaining: u64,
     state: StreamState,
+    continuing: Option<Continuing>,
     dependency: Option<StreamId>,
     exclusive_dependency: Option<bool>,
     weight: Option<u8>,
@@ -35,6 +46,7 @@ impl Stream {
             request_id: 0,
             window_remaining,
             state: StreamState::Idle,
+            continuing: None,
             dependency: None,
             exclusive_dependency: None,
             weight: None,
@@ -44,31 +56,112 @@ impl Stream {
         }
     }
 
-    pub fn on_frame(
+    /// https://httpwg.org/specs/rfc7540.html#StreamStates
+    pub fn transition_state(
         &mut self,
-        frame: Frame,
-        send_buffer: &mut impl BufMut,
-        header_decoder: &mut hpack::Decoder,
+        recv: bool,
+        ty: FrameType,
+        flags: Flags,
+    ) -> anyhow::Result<()> {
+        let send = !recv;
+        let original_state = self.state;
+
+        if matches!(ty, FrameType::ResetStream) {
+            if self.state == StreamState::Idle {
+                return Err(anyhow!("ResetStream on Idle"));
+            }
+            self.state = StreamState::Closed;
+        } else {
+            let h = match flags {
+                Flags::Headers(flags) => flags.contains(HeadersFlags::END_HEADERS),
+                Flags::Continuation(flags) => {
+                    matches!(self.continuing, Some(Continuing::Headers))
+                        && flags.contains(ContinuationFlags::END_HEADERS)
+                }
+                _ => false,
+            };
+            let pp = match flags {
+                Flags::PushPromise(flags) => flags.contains(PushPromiseFlags::END_HEADERS),
+                Flags::Continuation(flags) => {
+                    matches!(self.continuing, Some(Continuing::PushPromise))
+                        && flags.contains(ContinuationFlags::END_HEADERS)
+                }
+                _ => false,
+            };
+            let es = match flags {
+                Flags::Data(flags) => flags.contains(DataFlags::END_STREAM),
+                Flags::Headers(flags) => flags.contains(HeadersFlags::END_STREAM),
+                _ => false,
+            };
+
+            if self.state == StreamState::Idle {
+                if send && pp {
+                    self.state = StreamState::ReservedLocal;
+                } else if recv && pp {
+                    self.state = StreamState::ReservedRemote;
+                } else if h {
+                    self.state = StreamState::Open;
+                }
+            }
+
+            if self.state == StreamState::ReservedLocal && send && h {
+                self.state = StreamState::HalfClosedRemote;
+            }
+
+            if self.state == StreamState::ReservedRemote && recv && h {
+                self.state = StreamState::HalfClosedLocal;
+            }
+
+            if self.state == StreamState::Open && send && es {
+                self.state = StreamState::HalfClosedLocal;
+            }
+
+            if self.state == StreamState::Open && recv && es {
+                self.state = StreamState::HalfClosedRemote;
+            }
+
+            if self.state == StreamState::HalfClosedRemote && send && es {
+                self.state = StreamState::Closed;
+            }
+
+            if self.state == StreamState::HalfClosedLocal && recv && es {
+                self.state = StreamState::Closed;
+            }
+        }
+
+        if self.state != original_state {
+            trace!(
+                "stream {} {:?} -> {:?}",
+                self.id,
+                original_state,
+                self.state
+            );
+        }
+
+        Ok(())
+    }
+
+    pub fn handle_frame(
+        &mut self,
+        state: &mut ConnectionState,
+        payload: FramePayload,
     ) -> anyhow::Result<Option<Response>> {
-        Ok(match frame {
-            Frame::Data {
-                flags,
-                flow_control_size,
-                data,
-                ..
-            } => {
+        let header = state.header.as_ref().expect("no header for payload");
+        self.transition_state(true, header.ty, header.flags)?;
+        Ok(match (header.flags, payload) {
+            (Flags::Data(flags), FramePayload::Data { data, .. }) => {
                 // TODO: proper flow control
-                if let Some(increment) = NonZeroU32::new(flow_control_size) {
-                    Frame::WindowUpdate {
-                        stream: self.id.get(),
-                        increment,
-                    }
-                    .into_bytes(send_buffer);
-                    Frame::WindowUpdate {
-                        stream: 0,
-                        increment,
-                    }
-                    .into_bytes(send_buffer);
+                if let Some(increment) = NonZeroU32::new(header.length as u32) {
+                    FramePayload::WindowUpdate { increment }.write_into(
+                        &mut state.write_buf,
+                        Some(self),
+                        Flags::None,
+                    );
+                    FramePayload::WindowUpdate { increment }.write_into(
+                        &mut state.write_buf,
+                        None,
+                        Flags::None,
+                    );
                 }
 
                 self.body_buffer.extend(data);
@@ -78,20 +171,16 @@ impl Stream {
                     None
                 }
             }
-            Frame::Headers {
-                flags,
-                dependency,
-                exclusive_dependency,
-                weight,
-                fragment,
-                ..
-            } => {
-                if self.state == StreamState::Closed {
-                    self.state = StreamState::Open;
-                } else if self.state == StreamState::ReservedRemote {
-                    self.state = StreamState::HalfClosedLocal;
-                }
-
+            (
+                Flags::Headers(flags),
+                FramePayload::Headers {
+                    dependency,
+                    exclusive_dependency,
+                    weight,
+                    fragment,
+                    ..
+                },
+            ) => {
                 if flags.contains(HeadersFlags::PRIORITY) {
                     self.dependency = dependency;
                     self.exclusive_dependency = exclusive_dependency;
@@ -100,7 +189,9 @@ impl Stream {
 
                 self.headers_buffer.extend(fragment);
                 if flags.contains(HeadersFlags::END_HEADERS) {
-                    self.decode_headers(header_decoder);
+                    self.decode_headers(&mut state.header_decoder);
+                } else {
+                    self.continuing = Some(Continuing::Headers);
                 }
 
                 match (
@@ -108,62 +199,57 @@ impl Stream {
                     flags.contains(HeadersFlags::END_STREAM),
                 ) {
                     (true, true) => {
-                        self.state = StreamState::Closed;
-                        self.decode_headers(header_decoder);
+                        self.decode_headers(&mut state.header_decoder);
                         Some(self.decode_response())
                     }
                     (true, false) => {
-                        self.decode_headers(header_decoder);
+                        self.decode_headers(&mut state.header_decoder);
                         None
                     }
-                    (false, true) => {
-                        self.state = StreamState::Closed;
-                        None
-                    }
+                    (false, true) => None,
                     (false, false) => None,
                 }
             }
-            Frame::Priority {
-                dependency,
-                exclusive_dependency,
-                weight,
-                ..
-            } => {
+            (
+                Flags::None,
+                FramePayload::Priority {
+                    dependency,
+                    exclusive_dependency,
+                    weight,
+                    ..
+                },
+            ) => {
                 self.dependency = Some(dependency);
                 self.exclusive_dependency = Some(exclusive_dependency);
                 self.weight = Some(weight);
                 None
             }
-            Frame::ResetStream { error, .. } => {
+            (Flags::None, FramePayload::ResetStream { error, .. }) => {
                 warn!("Reset stream: {:?}", error);
-                self.state = StreamState::Closed;
                 None
             }
-            Frame::PushPromise {
-                promised_stream, ..
-            } => {
-                // TODO: handle pushes
-                Frame::ResetStream {
-                    stream: NonZeroStreamId::new(promised_stream)
-                        .ok_or(FrameDecodeError::ZeroStreamId)?,
-                    error: ErrorType::RefusedStream,
+            (Flags::PushPromise(flags), FramePayload::PushPromise { fragment, .. }) => {
+                self.headers_buffer.extend(fragment);
+                if flags.contains(PushPromiseFlags::END_HEADERS) {
+                    self.decode_headers(&mut state.header_decoder);
+                } else {
+                    self.continuing = Some(Continuing::PushPromise);
                 }
-                .into_bytes(send_buffer);
                 None
             }
-            Frame::WindowUpdate { increment, .. } => {
+            (Flags::None, FramePayload::WindowUpdate { increment, .. }) => {
                 self.window_remaining += self
                     .window_remaining
                     .saturating_add(u64::from(increment.get()));
                 None
             }
-            Frame::Continuation {
-                flags, fragment, ..
-            } => {
+            (Flags::Continuation(flags), FramePayload::Continuation { fragment, .. }) => {
                 self.headers_buffer.extend(fragment);
                 if flags.contains(ContinuationFlags::END_HEADERS) {
-                    self.decode_headers(header_decoder);
-                    if self.state == StreamState::Closed {
+                    self.continuing = None;
+
+                    self.decode_headers(&mut state.header_decoder);
+                    if self.state != StreamState::Open {
                         Some(self.decode_response())
                     } else {
                         None
@@ -172,9 +258,15 @@ impl Stream {
                     None
                 }
             }
-            Frame::Settings { .. } | Frame::Ping { .. } | Frame::GoAway { .. } => {
+            (
+                _,
+                FramePayload::Settings { .. }
+                | FramePayload::Ping { .. }
+                | FramePayload::GoAway { .. },
+            ) => {
                 unreachable!("can't be sent to a stream");
             }
+            _ => unreachable!("impossible Flags/FramePayload combo"),
         })
     }
 
