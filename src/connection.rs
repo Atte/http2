@@ -1,10 +1,11 @@
-use crate::{flags::*, frame::*, stream_coordinator::*, types::*};
+use crate::{
+    flags::*, frame::*, request::Request, response::Response, stream_coordinator::*, types::*,
+};
 use anyhow::anyhow;
 use bytes::{Buf, Bytes, BytesMut};
 use derivative::Derivative;
 use enum_map::{enum_map, EnumMap};
 use log::{debug, error, trace, warn};
-use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::{
     io::{split, AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
@@ -15,22 +16,6 @@ use tokio::{
 };
 use tokio_rustls::TlsConnector;
 use url::Url;
-
-static REQUEST_ID: AtomicUsize = AtomicUsize::new(1);
-
-#[derive(Debug, Clone)]
-pub struct Request {
-    pub id: usize,
-    pub headers: Vec<(String, String)>,
-    pub body: Bytes,
-}
-
-#[derive(Debug, Clone)]
-pub struct Response {
-    pub request_id: usize,
-    pub headers: Vec<(String, String)>,
-    pub body: Bytes,
-}
 
 #[derive(Derivative)]
 #[derivative(Debug)]
@@ -111,7 +96,7 @@ impl Request {
 }
 
 impl Connection {
-    pub async fn connect(url: Url, connector: &TlsConnector) -> anyhow::Result<Self> {
+    pub async fn connect(url: &Url, connector: &TlsConnector) -> anyhow::Result<Self> {
         let (mut reader, mut writer) = split(
             connector
                 .connect(
@@ -297,26 +282,13 @@ impl Connection {
         })
     }
 
-    pub async fn request(
-        &self,
-        headers: Vec<(String, String)>,
-        body: impl Into<Bytes>,
-    ) -> anyhow::Result<Response> {
-        let id = REQUEST_ID.fetch_add(1, Ordering::SeqCst);
-
+    pub async fn request(&self, request: Request) -> anyhow::Result<Response> {
+        let request_id = request.id;
         let mut receiver = self.responses.subscribe();
-
-        self.requests
-            .send(Request {
-                id,
-                headers: headers.clone(),
-                body: body.into(),
-            })
-            .await?;
-
+        self.requests.send(request).await?;
         loop {
             let response = receiver.recv().await?;
-            if response.request_id == id {
+            if response.request_id == request_id {
                 return Ok(response);
             }
         }

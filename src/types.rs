@@ -7,6 +7,8 @@ pub const U31_MAX: NonZeroU32 = unsafe { NonZeroU32::new_unchecked(u32::MAX >> 1
 pub type StreamId = u32;
 pub type NonZeroStreamId = std::num::NonZeroU32;
 
+pub type Headers = Vec<(String, String)>;
+
 #[derive(thiserror::Error, Debug)]
 pub enum FrameDecodeError {
     #[error("Not enough bytes to decode frame")]

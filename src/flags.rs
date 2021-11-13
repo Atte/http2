@@ -1,4 +1,5 @@
 use bitflags::bitflags;
+use derivative::Derivative;
 
 bitflags! {
     /// https://httpwg.org/specs/rfc7540.html#DATA
@@ -58,13 +59,20 @@ bitflags! {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, derive_more::From, derive_more::TryInto)]
+#[derive(Derivative, Clone, Copy, PartialEq, Eq, derive_more::From, derive_more::TryInto)]
+#[derivative(Debug)]
 pub enum Flags {
+    #[derivative(Debug = "transparent")]
     Data(DataFlags),
+    #[derivative(Debug = "transparent")]
     Headers(HeadersFlags),
+    #[derivative(Debug = "transparent")]
     Settings(SettingsFlags),
+    #[derivative(Debug = "transparent")]
     PushPromise(PushPromiseFlags),
+    #[derivative(Debug = "transparent")]
     Ping(PingFlags),
+    #[derivative(Debug = "transparent")]
     Continuation(ContinuationFlags),
     None,
 }

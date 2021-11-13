@@ -1,4 +1,4 @@
-use crate::{connection::*, flags::*, frame::*, types::*};
+use crate::{connection::*, flags::*, frame::*, response::Response, types::*};
 use anyhow::anyhow;
 use bytes::BytesMut;
 use derivative::Derivative;
