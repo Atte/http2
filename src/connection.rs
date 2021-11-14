@@ -59,42 +59,6 @@ pub struct Connection {
     responses: broadcast::Sender<Response>,
 }
 
-impl Request {
-    fn write_into(self, state: &mut ConnectionState, streams: &mut StreamCoordinator) {
-        let stream = streams.create_mut();
-        stream.request_id = self.id;
-        FramePayload::Headers {
-            dependency: None,
-            exclusive_dependency: None,
-            weight: None,
-            fragment: state
-                .header_encoder
-                .encode(
-                    self.headers
-                        .iter()
-                        .map(|(key, value)| (key.as_bytes(), value.as_bytes())),
-                )
-                .into(),
-        }
-        .write_into(
-            &mut state.write_buf,
-            Some(stream),
-            if self.body.is_empty() {
-                HeadersFlags::END_STREAM | HeadersFlags::END_HEADERS
-            } else {
-                HeadersFlags::END_HEADERS
-            },
-        );
-        if !self.body.is_empty() {
-            FramePayload::Data { data: self.body }.write_into(
-                &mut state.write_buf,
-                Some(stream),
-                DataFlags::END_STREAM,
-            );
-        }
-    }
-}
-
 impl Connection {
     pub async fn connect(url: &Url, connector: &TlsConnector) -> anyhow::Result<Self> {
         let (mut reader, mut writer) = split(
@@ -123,7 +87,6 @@ impl Connection {
             let mut streams = StreamCoordinator::default();
 
             loop {
-                let was_ready = state.ready;
                 tokio::select! {
                     res = reader.read_buf(&mut state.read_buf) => {
                         res.expect("read_buf");
@@ -145,7 +108,9 @@ impl Connection {
                                         }
                                         state.header = None;
                                     },
-                                    Err(FrameDecodeError::TooShort) => {}
+                                    Err(FrameDecodeError::TooShort) => {
+                                        break;
+                                    }
                                     err @ Err(_) => {
                                         err.expect("FramePayload::try_from");
                                     },
@@ -164,7 +129,7 @@ impl Connection {
                     res = writer.write_buf(&mut state.write_buf), if state.write_buf.has_remaining() => {
                         res.expect("write_buf");
                     }
-                    request = request_rx.recv(), if was_ready => {
+                    request = request_rx.recv(), if state.ready => {
                         if let Some(request) = request {
                             trace!("{:#?}", request);
                             request.write_into(&mut state, &mut streams);

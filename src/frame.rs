@@ -68,7 +68,7 @@ impl TryFrom<&mut BytesMut> for FrameHeader {
                 },
                 stream_id,
             };
-            trace!("[RECV HEAD] {:#?}", header);
+            trace!("[RECV] {:#?}", header);
             Ok(header)
         } else {
             Err(FrameDecodeError::TooShort)
@@ -205,7 +205,7 @@ impl FramePayload {
             }
             _ => unreachable!("impossible FrameType/Flags combos"),
         };
-        //trace!("[RECV BODY] {:#?}", frame);
+        //trace!("[RECV] {:#?}", frame);
         Ok(frame)
     }
 
@@ -292,10 +292,10 @@ impl FramePayload {
             stream_id: stream.map_or(0, |s| s.id.get()),
         };
 
-        trace!("[SEND HEAD] {:#?}", header);
+        trace!("[SEND] {:#?}", header);
         header.write_into(buffer);
 
-        //trace!("[SEND BODY] {:#?}", payload);
+        //trace!("[SEND] {:#?}", payload);
         buffer.put(&payload[..]);
     }
 }

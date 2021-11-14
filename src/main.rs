@@ -13,7 +13,7 @@ async fn main() {
     let url = Url::parse(matches.value_of("url").expect("missing url")).expect("invalid url");
 
     let client = Client::default();
-    match client.request(Request::get(url, None)).await {
+    match client.request(Request::get(url)).await {
         Ok(response) => println!("{}", String::from_utf8_lossy(&response.body)),
         Err(err) => eprintln!("{:#?}", err),
     }

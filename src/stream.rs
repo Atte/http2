@@ -35,7 +35,7 @@ pub struct Stream {
     weight: Option<u8>,
     headers_buffer: BytesMut,
     body_buffer: BytesMut,
-    response_headers: Vec<(String, String)>,
+    response_headers: Headers,
 }
 
 impl Stream {
