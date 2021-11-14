@@ -29,6 +29,7 @@ impl StreamCoordinator {
 }
 
 impl Default for StreamCoordinator {
+    #[must_use]
     fn default() -> Self {
         Self {
             client_id: AtomicU32::new(3),

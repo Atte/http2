@@ -52,7 +52,7 @@ impl Stream {
             weight: None,
             headers_buffer: BytesMut::with_capacity(16_384 * 2),
             body_buffer: BytesMut::with_capacity(16_384 * 2),
-            response_headers: Vec::new(),
+            response_headers: Headers::new(),
         }
     }
 
@@ -273,10 +273,10 @@ impl Stream {
     fn decode_headers(&mut self, header_decoder: &mut hpack::Decoder) {
         header_decoder
             .decode_with_cb(&self.headers_buffer, |key, value| {
-                self.response_headers.push((
-                    String::from_utf8_lossy(&key).to_string(),
-                    String::from_utf8_lossy(&value).to_string(),
-                ));
+                self.response_headers
+                    .entry(String::from_utf8_lossy(&key).to_string())
+                    .or_default()
+                    .push(String::from_utf8_lossy(&value).to_string());
             })
             .expect("decode_with_cb");
         self.headers_buffer.clear();

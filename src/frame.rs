@@ -4,6 +4,7 @@ use log::trace;
 use num_traits::FromPrimitive;
 use std::num::NonZeroU32;
 
+#[inline]
 fn remove_padding(data: &mut Bytes) -> Bytes {
     let size = u8::from_be(data.get_u8()) as usize;
     data.copy_to_bytes(data.len() - size - 1)
@@ -301,6 +302,7 @@ impl FramePayload {
 }
 
 impl From<Vec<(SettingsParameter, u32)>> for FramePayload {
+    #[inline]
     fn from(params: Vec<(SettingsParameter, u32)>) -> Self {
         Self::Settings { params }
     }

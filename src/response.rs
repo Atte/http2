@@ -4,24 +4,21 @@ use std::borrow::Cow;
 
 #[derive(Debug, Clone)]
 pub struct Response {
-    pub request_id: usize,
+    pub(crate) request_id: usize,
     pub headers: Headers,
     pub body: Bytes,
 }
 
 impl Response {
-    pub fn headers<'a>(&'a self, key: &'a str) -> impl Iterator<Item = &'a str> {
-        // https://httpwg.org/specs/rfc7540.html#HttpHeaders
+    pub fn headers<'a>(&'a self, key: &'a str) -> Option<&Vec<String>> {
         // response headers MUST already be lowercase by spec, so only need to lower the user input
-        let key = key.to_lowercase();
-        self.headers
-            .iter()
-            .filter(move |(k, _)| k == &key)
-            .map(|(_, v)| v.as_ref())
+        self.headers.get(&key.to_lowercase())
     }
 
+    #[inline]
     pub fn header<'a>(&'a self, key: &'a str) -> Option<&'a str> {
-        self.headers(key).next()
+        self.headers(key)
+            .and_then(|values| values.first().map(String::as_ref))
     }
 
     pub fn status(&self) -> u16 {
@@ -31,11 +28,19 @@ impl Response {
             .expect("non-number status")
     }
 
+    #[inline]
+    pub fn ok(&self) -> bool {
+        let status = self.status();
+        status >= 200 && status < 300
+    }
+
+    #[inline]
     pub fn text(&self) -> Cow<'_, str> {
         String::from_utf8_lossy(&self.body)
     }
 
     #[cfg(feature = "json")]
+    #[inline]
     pub fn json<'a, T>(&'a self) -> serde_json::Result<T>
     where
         T: serde::Deserialize<'a>,

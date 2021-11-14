@@ -33,6 +33,7 @@ pub struct ConnectionState {
 }
 
 impl Default for ConnectionState {
+    #[must_use]
     fn default() -> Self {
         Self {
             their_settings: enum_map! {
@@ -60,6 +61,7 @@ pub struct Connection {
 }
 
 impl Connection {
+    #[must_use]
     pub async fn connect(url: &Url, connector: &TlsConnector) -> anyhow::Result<Self> {
         let (mut reader, mut writer) = split(
             connector

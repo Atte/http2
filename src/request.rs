@@ -1,8 +1,9 @@
 use crate::{
-    connection::ConnectionState, flags::*, frame::*, stream_coordinator::StreamCoordinator,
-    types::Headers,
+    connection::ConnectionState, flags::*, frame::*, response::Response,
+    stream_coordinator::StreamCoordinator, types::Headers,
 };
 use bytes::Bytes;
+use maplit::hashmap;
 use std::{
     fmt,
     sync::atomic::{AtomicUsize, Ordering},
@@ -39,6 +40,7 @@ impl AsRef<str> for Method {
 }
 
 impl fmt::Display for Method {
+    #[inline]
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> Result<(), fmt::Error> {
         f.write_str(self.as_ref())
     }
@@ -46,7 +48,7 @@ impl fmt::Display for Method {
 
 #[derive(Debug, Clone)]
 pub struct Request {
-    pub id: usize,
+    pub(crate) id: usize,
     pub url: Url,
     pub method: Method,
     pub headers: Headers,
@@ -54,24 +56,29 @@ pub struct Request {
 }
 
 impl Request {
-    pub fn get(url: Url) -> Self {
+    pub fn new(method: Method, url: Url, headers: Headers, body: impl Into<Bytes>) -> Self {
         Self {
             id: REQUEST_ID.fetch_add(1, Ordering::SeqCst),
             url,
-            method: Method::Get,
-            headers: Headers::default(),
-            body: Bytes::default(),
+            method,
+            headers,
+            body: body.into(),
         }
     }
 
-    pub fn post(url: Url, body: Bytes) -> Self {
-        Self {
-            id: REQUEST_ID.fetch_add(1, Ordering::SeqCst),
-            url,
-            method: Method::Post,
-            headers: Headers::default(),
-            body,
-        }
+    #[inline]
+    pub fn head(url: Url) -> Self {
+        Self::new(Method::Head, url, Headers::new(), Bytes::new())
+    }
+
+    #[inline]
+    pub fn get(url: Url) -> Self {
+        Self::new(Method::Get, url, Headers::new(), Bytes::new())
+    }
+
+    #[inline]
+    pub fn delete(url: Url) -> Self {
+        Self::new(Method::Delete, url, Headers::new(), Bytes::new())
     }
 
     #[cfg(feature = "json")]
@@ -79,17 +86,42 @@ impl Request {
     where
         T: serde::Serialize,
     {
-        Ok(Self {
-            id: REQUEST_ID.fetch_add(1, Ordering::SeqCst),
+        Ok(Self::new(
+            Method::Post,
             url,
-            method: Method::Post,
-            headers: vec![("content-type".to_owned(), "application/json".to_owned())],
-            body: Bytes::from(serde_json::to_vec(body)?),
-        })
+            hashmap! { "content-type".to_owned() => vec!["application/json".to_owned()] },
+            serde_json::to_vec(body)?,
+        ))
     }
 
-    pub fn write_into(self, state: &mut ConnectionState, streams: &mut StreamCoordinator) {
-        let authority = if let Some(port) = self.url.port() {
+    #[cfg(feature = "json")]
+    pub fn put_json<T>(url: Url, body: &T) -> serde_json::Result<Self>
+    where
+        T: serde::Serialize,
+    {
+        Ok(Self::new(
+            Method::Put,
+            url,
+            hashmap! { "content-type".to_owned() => vec!["application/json".to_owned()] },
+            serde_json::to_vec(body)?,
+        ))
+    }
+
+    #[cfg(feature = "json")]
+    pub fn patch_json<T>(url: Url, body: &T) -> serde_json::Result<Self>
+    where
+        T: serde::Serialize,
+    {
+        Ok(Self::new(
+            Method::Patch,
+            url,
+            hashmap! { "content-type".to_owned() => vec!["application/json".to_owned()] },
+            serde_json::to_vec(body)?,
+        ))
+    }
+
+    pub fn origin(&self) -> String {
+        if let Some(port) = self.url.port() {
             format!(
                 "{}:{}",
                 self.url.host().expect("URL cannot be a base"),
@@ -97,18 +129,62 @@ impl Request {
             )
         } else {
             self.url.host().expect("URL cannot be a base").to_string()
+        }
+    }
+
+    pub fn redirect(&self, response: &Response) -> Option<Self> {
+        if let Some(location) = response
+            .header("location")
+            .and_then(|location| self.url.join(location).ok())
+        {
+            match response.status() {
+                // change method to GET
+                301 | 302 | 303 => {
+                    let mut headers = response.headers.clone();
+                    headers.insert("location".to_owned(), vec![location.to_string()]);
+                    Some(Self::new(
+                        Method::Get,
+                        self.url.clone(),
+                        headers,
+                        Bytes::new(),
+                    ))
+                }
+                // use the same method
+                307 | 308 => {
+                    let mut headers = response.headers.clone();
+                    headers.insert("location".to_owned(), vec![location.to_string()]);
+                    Some(Self::new(
+                        self.method.clone(),
+                        self.url.clone(),
+                        headers,
+                        self.body.clone(),
+                    ))
+                }
+                _ => None,
+            }
+        } else {
+            None
+        }
+    }
+
+    pub(crate) fn write_into(self, state: &mut ConnectionState, streams: &mut StreamCoordinator) {
+        let path = if let Some(query) = self.url.query() {
+            format!("{}?{}", self.url.path(), query)
+        } else {
+            self.url.path().to_owned()
         };
+        let origin = self.origin();
         let pseudo_headers: [(&[u8], &[u8]); 4] = [
             (b":method", self.method.as_ref().as_bytes()),
             (b":scheme", self.url.scheme().as_bytes()),
-            (b":path", self.url.path().as_bytes()),
-            (b":authority", authority.as_bytes()),
+            (b":path", path.as_bytes()),
+            (b":authority", origin.as_bytes()),
         ];
-        // header names MUST be lowercase
         let headers: Vec<(String, String)> = self
             .headers
             .into_iter()
-            .map(|(k, v)| (k.to_lowercase(), v))
+            // header names MUST be lowercase
+            .flat_map(|(k, vs)| vs.into_iter().map(move |v| (k.to_lowercase(), v)))
             .collect();
 
         let stream = streams.create_mut();
