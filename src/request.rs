@@ -133,38 +133,21 @@ impl Request {
     }
 
     pub fn redirect(&self, response: &Response) -> Option<Self> {
-        if let Some(location) = response
-            .header("location")
-            .and_then(|location| self.url.join(location).ok())
-        {
-            match response.status() {
-                // change method to GET
-                301 | 302 | 303 => {
-                    let mut headers = response.headers.clone();
-                    headers.insert("location".to_owned(), vec![location.to_string()]);
-                    Some(Self::new(
-                        Method::Get,
-                        self.url.clone(),
-                        headers,
-                        Bytes::new(),
-                    ))
-                }
-                // use the same method
-                307 | 308 => {
-                    let mut headers = response.headers.clone();
-                    headers.insert("location".to_owned(), vec![location.to_string()]);
-                    Some(Self::new(
-                        self.method.clone(),
-                        self.url.clone(),
-                        headers,
-                        self.body.clone(),
-                    ))
-                }
-                _ => None,
+        let (method, body) = match response.status() {
+            // change method to GET
+            301 | 302 | 303 => (Method::Get, Bytes::new()),
+            // use the same method
+            307 | 308 => (self.method.clone(), self.body.clone()),
+            _ => {
+                return None;
             }
-        } else {
-            None
-        }
+        };
+
+        let location = response
+            .header("location")
+            .and_then(|location| self.url.join(location).ok())?;
+
+        Some(Self::new(method, location, self.headers.clone(), body))
     }
 
     pub(crate) fn write_into(self, state: &mut ConnectionState, streams: &mut StreamCoordinator) {
