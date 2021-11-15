@@ -4,6 +4,7 @@ use bytes::BytesMut;
 use derivative::Derivative;
 use log::{trace, warn};
 use std::num::NonZeroU32;
+use tokio::sync::oneshot;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 enum StreamState {
@@ -26,7 +27,7 @@ enum Continuing {
 #[derivative(Debug)]
 pub struct Stream {
     pub id: NonZeroStreamId,
-    pub request_id: usize,
+    pub response_tx: Option<oneshot::Sender<Response>>,
     window_remaining: u64,
     state: StreamState,
     continuing: Option<Continuing>,
@@ -43,7 +44,7 @@ impl Stream {
     pub fn new(id: NonZeroStreamId, window_remaining: u64) -> Self {
         Self {
             id,
-            request_id: 0,
+            response_tx: None,
             window_remaining,
             state: StreamState::Idle,
             continuing: None,
@@ -145,10 +146,10 @@ impl Stream {
         &mut self,
         state: &mut ConnectionState,
         payload: FramePayload,
-    ) -> anyhow::Result<Option<Response>> {
+    ) -> anyhow::Result<()> {
         let header = state.header.as_ref().expect("no header for payload");
         self.transition_state(true, header.ty, header.flags)?;
-        Ok(match (header.flags, payload) {
+        match (header.flags, payload) {
             (Flags::Data(flags), FramePayload::Data { data, .. }) => {
                 // TODO: proper flow control
                 if let Some(increment) = NonZeroU32::new(header.length as u32) {
@@ -166,9 +167,7 @@ impl Stream {
 
                 self.body_buffer.extend(data);
                 if flags.contains(DataFlags::END_STREAM) {
-                    Some(self.decode_response())
-                } else {
-                    None
+                    self.send_response();
                 }
             }
             (
@@ -200,14 +199,12 @@ impl Stream {
                 ) {
                     (true, true) => {
                         self.decode_headers(&mut state.header_decoder);
-                        Some(self.decode_response())
+                        self.send_response();
                     }
                     (true, false) => {
                         self.decode_headers(&mut state.header_decoder);
-                        None
                     }
-                    (false, true) => None,
-                    (false, false) => None,
+                    (false, true) | (false, false) => {}
                 }
             }
             (
@@ -222,11 +219,9 @@ impl Stream {
                 self.dependency = Some(dependency);
                 self.exclusive_dependency = Some(exclusive_dependency);
                 self.weight = Some(weight);
-                None
             }
             (Flags::None, FramePayload::ResetStream { error, .. }) => {
                 warn!("Reset stream: {:?}", error);
-                None
             }
             (Flags::PushPromise(flags), FramePayload::PushPromise { fragment, .. }) => {
                 self.headers_buffer.extend(fragment);
@@ -235,13 +230,11 @@ impl Stream {
                 } else {
                     self.continuing = Some(Continuing::PushPromise);
                 }
-                None
             }
             (Flags::None, FramePayload::WindowUpdate { increment, .. }) => {
                 self.window_remaining += self
                     .window_remaining
                     .saturating_add(u64::from(increment.get()));
-                None
             }
             (Flags::Continuation(flags), FramePayload::Continuation { fragment, .. }) => {
                 self.headers_buffer.extend(fragment);
@@ -250,12 +243,8 @@ impl Stream {
 
                     self.decode_headers(&mut state.header_decoder);
                     if self.state != StreamState::Open {
-                        Some(self.decode_response())
-                    } else {
-                        None
+                        self.send_response();
                     }
-                } else {
-                    None
                 }
             }
             (
@@ -267,7 +256,8 @@ impl Stream {
                 unreachable!("can't be sent to a stream");
             }
             _ => unreachable!("impossible Flags/FramePayload combo"),
-        })
+        }
+        Ok(())
     }
 
     fn decode_headers(&mut self, header_decoder: &mut hpack::Decoder) {
@@ -282,11 +272,15 @@ impl Stream {
         self.headers_buffer.clear();
     }
 
-    fn decode_response(&mut self) -> Response {
-        Response {
-            request_id: self.request_id,
-            headers: self.response_headers.clone(),
-            body: self.body_buffer.clone().freeze(),
+    fn send_response(&mut self) {
+        if let Some(tx) = self.response_tx.take() {
+            let response = Response {
+                headers: self.response_headers.clone(),
+                body: self.body_buffer.clone().freeze(),
+            };
+            trace!("{:#?}", response);
+            // if the sender isn't interested in the response anymore, no need to error out hard
+            tx.send(response).ok();
         }
     }
 }

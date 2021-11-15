@@ -5,14 +5,11 @@ use anyhow::anyhow;
 use bytes::{Buf, Bytes, BytesMut};
 use derivative::Derivative;
 use enum_map::{enum_map, EnumMap};
-use log::{debug, error, trace, warn};
+use log::{debug, error, trace};
 use tokio::{
     io::{split, AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
-    sync::{
-        broadcast,
-        mpsc::{channel, Sender},
-    },
+    sync::{mpsc, oneshot},
 };
 use tokio_rustls::TlsConnector;
 use url::Url;
@@ -56,12 +53,10 @@ impl Default for ConnectionState {
 }
 
 pub struct Connection {
-    requests: Sender<Request>,
-    responses: broadcast::Sender<Response>,
+    requests: mpsc::Sender<(Request, oneshot::Sender<Response>)>,
 }
 
 impl Connection {
-    #[must_use]
     pub async fn connect(url: &Url, connector: &TlsConnector) -> anyhow::Result<Self> {
         let (mut reader, mut writer) = split(
             connector
@@ -80,9 +75,8 @@ impl Connection {
             .write_all(b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n")
             .await?;
 
-        let (request_tx, mut request_rx) = channel::<Request>(16);
-        let (response_tx, _response_rx) = broadcast::channel::<Response>(16);
-        let responses = response_tx.clone();
+        let (requests_tx, mut requests_rx) =
+            mpsc::channel::<(Request, oneshot::Sender<Response>)>(16);
 
         tokio::spawn(async move {
             let mut state = ConnectionState::default();
@@ -96,18 +90,7 @@ impl Connection {
                             if let Some(ref header) = state.header {
                                 match FramePayload::try_from(&mut state.read_buf, header) {
                                     Ok(payload) => {
-                                        match Self::handle_frame(&mut state, &mut streams, payload) {
-                                            Ok(Some(response)) => {
-                                                trace!("{:#?}", response);
-                                                if let Err(err) = response_tx.send(response) {
-                                                    warn!("Error broadcasting response: {:#?}", err);
-                                                }
-                                            },
-                                            Ok(None) => {}
-                                            err @ Err(_) => {
-                                                err.expect("handle_frame");
-                                            },
-                                        }
+                                        Self::handle_frame(&mut state, &mut streams, payload).expect("handle_frame");
                                         state.header = None;
                                     },
                                     Err(FrameDecodeError::TooShort) => {
@@ -131,10 +114,10 @@ impl Connection {
                     res = writer.write_buf(&mut state.write_buf), if state.write_buf.has_remaining() => {
                         res.expect("write_buf");
                     }
-                    request = request_rx.recv(), if state.ready => {
-                        if let Some(request) = request {
+                    entry = requests_rx.recv(), if state.ready => {
+                        if let Some((request, response_tx)) = entry {
                             trace!("{:#?}", request);
-                            request.write_into(&mut state, &mut streams);
+                            request.write_into(&mut state, &mut streams, response_tx);
                         } else {
                             return;
                         }
@@ -144,8 +127,7 @@ impl Connection {
         });
 
         Ok(Self {
-            requests: request_tx,
-            responses,
+            requests: requests_tx,
         })
     }
 
@@ -153,9 +135,9 @@ impl Connection {
         state: &mut ConnectionState,
         streams: &mut StreamCoordinator,
         payload: FramePayload,
-    ) -> anyhow::Result<Option<Response>> {
+    ) -> anyhow::Result<()> {
         let header = state.header.as_ref().expect("no header for payload");
-        Ok(match (header.flags, payload) {
+        match (header.flags, payload) {
             (Flags::Settings(flags), FramePayload::Settings { params, .. }) => {
                 if !flags.contains(SettingsFlags::ACK) {
                     for (key, value) in params {
@@ -178,7 +160,6 @@ impl Connection {
                         SettingsFlags::ACK,
                     );
                 }
-                None
             }
             (Flags::Ping(flags), FramePayload::Ping { data, .. }) => {
                 if !flags.contains(PingFlags::ACK) {
@@ -201,7 +182,6 @@ impl Connection {
                         );
                     }
                 }
-                None
             }
             (_, FramePayload::GoAway { error, debug, .. }) => {
                 error!("Go away: {:?}", error);
@@ -210,18 +190,16 @@ impl Connection {
                         debug!("Go away debug: {}", debug);
                     }
                 }
-                None
             }
             (_, FramePayload::WindowUpdate { increment, .. }) => {
                 if let Some(stream_id) = NonZeroStreamId::new(header.stream_id) {
                     streams
                         .get_mut(stream_id)
-                        .handle_frame(state, FramePayload::WindowUpdate { increment })?
+                        .handle_frame(state, FramePayload::WindowUpdate { increment })?;
                 } else {
                     state.window_remaining = state
                         .window_remaining
                         .saturating_add(increment.get() as usize);
-                    None
                 }
             }
             (
@@ -239,25 +217,22 @@ impl Connection {
                         fragment,
                     },
                 )?;
-                None
             }
-            (_, payload) => streams
-                .get_mut(
-                    NonZeroStreamId::new(header.stream_id).ok_or(FrameDecodeError::ZeroStreamId)?,
-                )
-                .handle_frame(state, payload)?,
-        })
+            (_, payload) => {
+                streams
+                    .get_mut(
+                        NonZeroStreamId::new(header.stream_id)
+                            .ok_or(FrameDecodeError::ZeroStreamId)?,
+                    )
+                    .handle_frame(state, payload)?;
+            }
+        }
+        Ok(())
     }
 
     pub async fn request(&self, request: Request) -> anyhow::Result<Response> {
-        let request_id = request.id;
-        let mut receiver = self.responses.subscribe();
-        self.requests.send(request).await?;
-        loop {
-            let response = receiver.recv().await?;
-            if response.request_id == request_id {
-                return Ok(response);
-            }
-        }
+        let (tx, rx) = oneshot::channel();
+        self.requests.send((request, tx)).await?;
+        Ok(rx.await?)
     }
 }

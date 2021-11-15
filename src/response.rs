@@ -4,7 +4,6 @@ use std::borrow::Cow;
 
 #[derive(Debug, Clone)]
 pub struct Response {
-    pub(crate) request_id: usize,
     pub headers: Headers,
     pub body: Bytes,
 }
@@ -30,8 +29,7 @@ impl Response {
 
     #[inline]
     pub fn ok(&self) -> bool {
-        let status = self.status();
-        status >= 200 && status < 300
+        (200..300).contains(&self.status())
     }
 
     #[inline]

@@ -4,13 +4,9 @@ use crate::{
 };
 use bytes::Bytes;
 use maplit::hashmap;
-use std::{
-    fmt,
-    sync::atomic::{AtomicUsize, Ordering},
-};
+use std::fmt;
+use tokio::sync::oneshot;
 use url::Url;
-
-static REQUEST_ID: AtomicUsize = AtomicUsize::new(1);
 
 #[derive(Debug, Clone)]
 pub enum Method {
@@ -48,7 +44,6 @@ impl fmt::Display for Method {
 
 #[derive(Debug, Clone)]
 pub struct Request {
-    pub(crate) id: usize,
     pub url: Url,
     pub method: Method,
     pub headers: Headers,
@@ -58,7 +53,6 @@ pub struct Request {
 impl Request {
     pub fn new(method: Method, url: Url, headers: Headers, body: impl Into<Bytes>) -> Self {
         Self {
-            id: REQUEST_ID.fetch_add(1, Ordering::SeqCst),
             url,
             method,
             headers,
@@ -138,7 +132,12 @@ impl Request {
         Some(Self::new(method, location, self.headers.clone(), body))
     }
 
-    pub(crate) fn write_into(self, state: &mut ConnectionState, streams: &mut StreamCoordinator) {
+    pub(crate) fn write_into(
+        self,
+        state: &mut ConnectionState,
+        streams: &mut StreamCoordinator,
+        response_tx: oneshot::Sender<Response>,
+    ) {
         let path = if let Some(query) = self.url.query() {
             format!("{}?{}", self.url.path(), query)
         } else {
@@ -167,7 +166,7 @@ impl Request {
             .collect();
 
         let stream = streams.create_mut();
-        stream.request_id = self.id;
+        stream.response_tx = Some(response_tx);
 
         FramePayload::Headers {
             dependency: None,
