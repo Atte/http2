@@ -120,18 +120,6 @@ impl Request {
         ))
     }
 
-    pub fn origin(&self) -> String {
-        if let Some(port) = self.url.port() {
-            format!(
-                "{}:{}",
-                self.url.host().expect("URL cannot be a base"),
-                port
-            )
-        } else {
-            self.url.host().expect("URL cannot be a base").to_string()
-        }
-    }
-
     pub fn redirect(&self, response: &Response) -> Option<Self> {
         let (method, body) = match response.status() {
             // change method to GET
@@ -156,12 +144,20 @@ impl Request {
         } else {
             self.url.path().to_owned()
         };
-        let origin = self.origin();
+        let authority = if let Some(port) = self.url.port() {
+            format!(
+                "{}:{}",
+                self.url.host().expect("URL cannot be a base"),
+                port
+            )
+        } else {
+            self.url.host().expect("URL cannot be a base").to_string()
+        };
         let pseudo_headers: [(&[u8], &[u8]); 4] = [
             (b":method", self.method.as_ref().as_bytes()),
             (b":scheme", self.url.scheme().as_bytes()),
             (b":path", path.as_bytes()),
-            (b":authority", origin.as_bytes()),
+            (b":authority", authority.as_bytes()),
         ];
         let headers: Vec<(String, String)> = self
             .headers

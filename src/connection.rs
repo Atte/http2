@@ -80,8 +80,8 @@ impl Connection {
             .write_all(b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n")
             .await?;
 
-        let (request_tx, mut request_rx) = channel::<Request>(100);
-        let (response_tx, _response_rx) = broadcast::channel::<Response>(100);
+        let (request_tx, mut request_rx) = channel::<Request>(16);
+        let (response_tx, _response_rx) = broadcast::channel::<Response>(16);
         let responses = response_tx.clone();
 
         tokio::spawn(async move {
