@@ -19,7 +19,7 @@ pub struct FrameHeader {
 }
 
 impl FrameHeader {
-    pub const BYTES: usize = 9;
+    pub const SIZE: usize = 9;
 
     pub fn write_into(self, buffer: &mut impl BufMut) {
         buffer.put(&(self.length as u32).to_be_bytes()[1..]);
@@ -43,7 +43,7 @@ impl FrameHeader {
 impl TryFrom<&mut BytesMut> for FrameHeader {
     type Error = FrameDecodeError;
     fn try_from(buffer: &mut BytesMut) -> Result<FrameHeader, FrameDecodeError> {
-        if buffer.remaining() >= Self::BYTES {
+        if buffer.remaining() >= Self::SIZE {
             let length = u32::from_be_bytes(
                 [&[0_u8], buffer.copy_to_bytes(3).as_ref()]
                     .concat()

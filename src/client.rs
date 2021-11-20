@@ -2,7 +2,7 @@ use crate::{connection::Connection, request::Request, response::Response};
 use std::{collections::HashMap, sync::Arc};
 use tokio::sync::Mutex;
 use tokio_rustls::{
-    rustls::{ClientConfig, OwnedTrustAnchor, RootCertStore},
+    rustls::{client::ClientSessionMemoryCache, ClientConfig, OwnedTrustAnchor, RootCertStore},
     TlsConnector,
 };
 use url::Origin;
@@ -14,6 +14,7 @@ pub struct Client {
 }
 
 impl Client {
+    #[cfg(not(http2_reconnect_every_time))]
     pub async fn request(&self, request: Request) -> anyhow::Result<Response> {
         let origin = request.url.origin();
         let mut connections = self.connections.lock().await;
@@ -24,6 +25,15 @@ impl Client {
             );
         }
         Ok(connections.get(&origin).unwrap().request(request).await?)
+    }
+
+    // for debugging session resumption and such
+    #[cfg(http2_reconnect_every_time)]
+    pub async fn request(&self, request: Request) -> anyhow::Result<Response> {
+        Ok(Connection::connect(&request.url, &self.connector)
+            .await?
+            .request(request)
+            .await?)
     }
 }
 
@@ -43,6 +53,8 @@ impl Default for Client {
             .with_root_certificates(root_store)
             .with_no_client_auth();
         config.alpn_protocols = vec![vec![b'h', b'2']];
+        config.session_storage = ClientSessionMemoryCache::new(16);
+        config.enable_early_data = true;
         Self {
             connector: Arc::new(config).into(),
             connections: Default::default(),

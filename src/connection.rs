@@ -44,13 +44,15 @@ impl Default for ConnectionState {
             window_remaining: 65_535,
             header_encoder: hpack::Encoder::new(),
             header_decoder: hpack::Decoder::new(),
-            read_buf: BytesMut::with_capacity(16_384 + FrameHeader::BYTES),
-            write_buf: BytesMut::with_capacity(16_384 + FrameHeader::BYTES),
+            read_buf: BytesMut::with_capacity(16_384 + FrameHeader::SIZE),
+            write_buf: BytesMut::with_capacity(16_384 + FrameHeader::SIZE),
             header: None,
             ready: false,
         }
     }
 }
+
+static CLIENT_CONNECTION_PREFACE: &[u8] = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
 
 pub struct Connection {
     requests: mpsc::Sender<(Request, oneshot::Sender<Response>)>,
@@ -58,23 +60,34 @@ pub struct Connection {
 
 impl Connection {
     pub async fn connect(url: &Url, connector: &TlsConnector) -> anyhow::Result<Self> {
-        let (mut reader, mut writer) = split(
-            connector
-                .connect(
-                    url.host_str()
-                        .ok_or_else(|| anyhow!("connect host name"))?
-                        .try_into()
-                        .expect("connect host name into server name"),
-                    TcpStream::connect(url.socket_addrs(|| None)?[0]).await?,
-                )
-                .await?,
-        );
-
-        // client connection preface
-        writer
-            .write_all(b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n")
+        let mut early_data_sent = false;
+        let mut stream = connector
+            .connect_with(
+                url.host_str()
+                    .ok_or_else(|| anyhow!("connect host name"))?
+                    .try_into()
+                    .map_err(|err| anyhow!("connect host name into server name: {:?}", err))?,
+                TcpStream::connect(url.socket_addrs(|| None)?[0]).await?,
+                |connection| {
+                    use std::io::Write;
+                    if let Some(mut early) = connection.early_data() {
+                        if early.bytes_left() >= CLIENT_CONNECTION_PREFACE.len() {
+                            if let Err(err) = early.write_all(CLIENT_CONNECTION_PREFACE) {
+                                error!("Failed to write early data: {:?}", err);
+                            } else {
+                                early_data_sent = true;
+                            }
+                        }
+                    }
+                },
+            )
             .await?;
 
+        if !early_data_sent || !stream.get_ref().1.is_early_data_accepted() {
+            stream.write_all(CLIENT_CONNECTION_PREFACE).await?;
+        }
+
+        let (mut reader, mut writer) = split(stream);
         let (requests_tx, mut requests_rx) =
             mpsc::channel::<(Request, oneshot::Sender<Response>)>(16);
 
