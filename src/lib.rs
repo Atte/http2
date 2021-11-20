@@ -2,6 +2,7 @@ mod client;
 mod connection;
 mod flags;
 mod frame;
+mod hpack;
 mod request;
 mod response;
 mod stream;
