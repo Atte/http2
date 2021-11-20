@@ -207,7 +207,7 @@ impl Stream {
                     (true, false) => {
                         self.decode_headers(&mut state.header_decoder)?;
                     }
-                    (false, true) | (false, false) => {}
+                    (false, true | false) => {}
                 }
             }
             (
@@ -263,7 +263,10 @@ impl Stream {
         Ok(())
     }
 
-    fn decode_headers(&mut self, header_decoder: &mut hpack::Decoder) -> Result<(), DecodeError> {
+    fn decode_headers(
+        &mut self,
+        header_decoder: &mut hpack::Decoder<'_>,
+    ) -> Result<(), DecodeError> {
         header_decoder
             .decode_with_cb(&self.headers_buffer, |key, value| {
                 self.response_headers

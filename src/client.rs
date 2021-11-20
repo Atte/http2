@@ -57,7 +57,7 @@ impl Default for Client {
         config.enable_early_data = true;
         Self {
             connector: Arc::new(config).into(),
-            connections: Default::default(),
+            connections: Mutex::default(),
         }
     }
 }

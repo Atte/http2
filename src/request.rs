@@ -43,6 +43,7 @@ impl fmt::Display for Method {
 }
 
 #[derive(Debug, Clone)]
+#[must_use]
 pub struct Request {
     pub url: Url,
     pub method: Method,

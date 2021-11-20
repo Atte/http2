@@ -137,7 +137,7 @@ impl Connection {
                                     return;
                                 }
                                 Err(err) => {
-                                    error!("Request error: {:?}", err)
+                                    error!("Request error: {:?}", err);
                                 }
                             }
                         } else {
