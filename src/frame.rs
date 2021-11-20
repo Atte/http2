@@ -41,8 +41,8 @@ impl FrameHeader {
 }
 
 impl TryFrom<&mut BytesMut> for FrameHeader {
-    type Error = FrameDecodeError;
-    fn try_from(buffer: &mut BytesMut) -> Result<FrameHeader, FrameDecodeError> {
+    type Error = DecodeError;
+    fn try_from(buffer: &mut BytesMut) -> Result<FrameHeader, DecodeError> {
         if buffer.remaining() >= Self::SIZE {
             let length = u32::from_be_bytes(
                 [&[0_u8], buffer.copy_to_bytes(3).as_ref()]
@@ -50,7 +50,7 @@ impl TryFrom<&mut BytesMut> for FrameHeader {
                     .try_into()
                     .unwrap(),
             ) as usize;
-            let ty = FrameType::from_u8(buffer.get_u8()).ok_or(FrameDecodeError::UnknownType)?;
+            let ty = FrameType::from_u8(buffer.get_u8()).ok_or(DecodeError::UnknownType)?;
             let flags = buffer.get_u8();
             let stream_id =
                 u32::from_be_bytes(buffer.copy_to_bytes(4).as_ref().try_into().unwrap())
@@ -72,7 +72,7 @@ impl TryFrom<&mut BytesMut> for FrameHeader {
             trace!("[RECV] {:#?}", header);
             Ok(header)
         } else {
-            Err(FrameDecodeError::TooShort)
+            Err(DecodeError::TooShort)
         }
     }
 }
@@ -120,9 +120,9 @@ pub enum FramePayload {
 }
 
 impl FramePayload {
-    pub fn try_from(buffer: &mut impl Buf, header: &FrameHeader) -> Result<Self, FrameDecodeError> {
+    pub fn try_from(buffer: &mut impl Buf, header: &FrameHeader) -> Result<Self, DecodeError> {
         if buffer.remaining() < header.length {
-            return Err(FrameDecodeError::TooShort);
+            return Err(DecodeError::TooShort);
         }
         let mut payload = buffer.copy_to_bytes(header.length);
 
@@ -167,7 +167,7 @@ impl FramePayload {
             }
             (FrameType::ResetStream, Flags::None) => Self::ResetStream {
                 error: ErrorType::from_u32(payload.get_u32())
-                    .ok_or(FrameDecodeError::UnknownErrorType)?,
+                    .ok_or(DecodeError::UnknownErrorType)?,
             },
             (FrameType::Settings, Flags::Settings(_)) => {
                 let mut params = Vec::new();
@@ -183,7 +183,7 @@ impl FramePayload {
             }
             (FrameType::PushPromise, Flags::PushPromise(flags)) => Self::PushPromise {
                 promised_stream: NonZeroStreamId::new(payload.get_u32() & (u32::MAX >> 1))
-                    .ok_or(FrameDecodeError::ZeroStreamId)?,
+                    .ok_or(DecodeError::ZeroStreamId)?,
                 fragment: if flags.contains(PushPromiseFlags::PADDED) {
                     remove_padding(&mut payload)
                 } else {
@@ -194,12 +194,12 @@ impl FramePayload {
             (FrameType::GoAway, Flags::None) => Self::GoAway {
                 last_stream: payload.get_u32() & (u32::MAX >> 1),
                 error: ErrorType::from_u32(payload.get_u32())
-                    .ok_or(FrameDecodeError::UnknownErrorType)?,
+                    .ok_or(DecodeError::UnknownErrorType)?,
                 debug: payload,
             },
             (FrameType::WindowUpdate, Flags::None) => Self::WindowUpdate {
                 increment: NonZeroU32::new(payload.get_u32() & (u32::MAX >> 1))
-                    .ok_or(FrameDecodeError::ZeroWindowIncrement)?,
+                    .ok_or(DecodeError::ZeroWindowIncrement)?,
             },
             (FrameType::Continuation, Flags::Continuation(_)) => {
                 Self::Continuation { fragment: payload }

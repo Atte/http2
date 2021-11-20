@@ -21,10 +21,10 @@ impl StreamCoordinator {
             .or_insert_with(|| Stream::new(id, 65_535))
     }
 
-    pub fn create_mut(&mut self) -> &mut Stream {
-        let id = NonZeroStreamId::new(self.client_id.fetch_add(2, Ordering::SeqCst))
-            .expect("stream ID wrapped");
-        self.get_mut(id)
+    /// returns None if the connection is out of stream IDs
+    pub fn create_mut(&mut self) -> Option<&mut Stream> {
+        NonZeroStreamId::new(self.client_id.fetch_add(2, Ordering::SeqCst))
+            .map(|id| self.get_mut(id))
     }
 }
 

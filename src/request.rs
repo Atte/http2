@@ -1,6 +1,6 @@
 use crate::{
     connection::ConnectionState, flags::*, frame::*, response::Response,
-    stream_coordinator::StreamCoordinator, types::Headers,
+    stream_coordinator::StreamCoordinator, types::*,
 };
 use bytes::Bytes;
 use maplit::hashmap;
@@ -137,7 +137,7 @@ impl Request {
         state: &mut ConnectionState,
         streams: &mut StreamCoordinator,
         response_tx: oneshot::Sender<Response>,
-    ) {
+    ) -> Result<(), RequestError> {
         let path = if let Some(query) = self.url.query() {
             format!("{}?{}", self.url.path(), query)
         } else {
@@ -146,11 +146,14 @@ impl Request {
         let authority = if let Some(port) = self.url.port() {
             format!(
                 "{}:{}",
-                self.url.host().expect("URL cannot be a base"),
+                self.url.host().ok_or(RequestError::AuthorityCannotBeBase)?,
                 port
             )
         } else {
-            self.url.host().expect("URL cannot be a base").to_string()
+            self.url
+                .host()
+                .ok_or(RequestError::AuthorityCannotBeBase)?
+                .to_string()
         };
         let pseudo_headers: [(&[u8], &[u8]); 4] = [
             (b":method", self.method.as_ref().as_bytes()),
@@ -165,7 +168,7 @@ impl Request {
             .flat_map(|(k, vs)| vs.into_iter().map(move |v| (k.to_lowercase(), v)))
             .collect();
 
-        let stream = streams.create_mut();
+        let stream = streams.create_mut().ok_or(RequestError::OutOfStreamIds)?;
         stream.response_tx = Some(response_tx);
 
         FramePayload::Headers {
@@ -199,5 +202,7 @@ impl Request {
                 DataFlags::END_STREAM,
             );
         }
+
+        Ok(())
     }
 }

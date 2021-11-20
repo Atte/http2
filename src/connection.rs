@@ -5,7 +5,7 @@ use anyhow::anyhow;
 use bytes::{Buf, Bytes, BytesMut};
 use derivative::Derivative;
 use enum_map::{enum_map, EnumMap};
-use log::{debug, error, trace};
+use log::{debug, error, trace, warn};
 use tokio::{
     io::{split, AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
@@ -106,7 +106,7 @@ impl Connection {
                                         Self::handle_frame(&mut state, &mut streams, payload).expect("handle_frame");
                                         state.header = None;
                                     },
-                                    Err(FrameDecodeError::TooShort) => {
+                                    Err(DecodeError::TooShort) => {
                                         break;
                                     }
                                     err @ Err(_) => {
@@ -116,7 +116,7 @@ impl Connection {
                             } else {
                                 match FrameHeader::try_from(&mut state.read_buf) {
                                   Ok(header) => { state.header = Some(header); }
-                                  Err(FrameDecodeError::TooShort) => { break; }
+                                  Err(DecodeError::TooShort) => { break; }
                                   err @ Err(_) => {
                                     err.expect("FrameHeader::try_from");
                                   }
@@ -130,8 +130,18 @@ impl Connection {
                     entry = requests_rx.recv(), if state.ready => {
                         if let Some((request, response_tx)) = entry {
                             trace!("{:#?}", request);
-                            request.write_into(&mut state, &mut streams, response_tx);
+                            match request.write_into(&mut state, &mut streams, response_tx) {
+                                Ok(_) => {}
+                                Err(RequestError::OutOfStreamIds) => {
+                                    warn!("Out of stream IDs");
+                                    return;
+                                }
+                                Err(err) => {
+                                    error!("Request error: {:?}", err)
+                                }
+                            }
                         } else {
+                            // end task if no one can send any requests anymore
                             return;
                         }
                     }
@@ -149,7 +159,10 @@ impl Connection {
         streams: &mut StreamCoordinator,
         payload: FramePayload,
     ) -> anyhow::Result<()> {
-        let header = state.header.as_ref().expect("no header for payload");
+        let header = state
+            .header
+            .as_ref()
+            .ok_or_else(|| anyhow!("no header for payload"))?;
         match (header.flags, payload) {
             (Flags::Settings(flags), FramePayload::Settings { params, .. }) => {
                 if !flags.contains(SettingsFlags::ACK) {
@@ -234,8 +247,7 @@ impl Connection {
             (_, payload) => {
                 streams
                     .get_mut(
-                        NonZeroStreamId::new(header.stream_id)
-                            .ok_or(FrameDecodeError::ZeroStreamId)?,
+                        NonZeroStreamId::new(header.stream_id).ok_or(DecodeError::ZeroStreamId)?,
                     )
                     .handle_frame(state, payload)?;
             }

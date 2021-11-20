@@ -147,7 +147,10 @@ impl Stream {
         state: &mut ConnectionState,
         payload: FramePayload,
     ) -> anyhow::Result<()> {
-        let header = state.header.as_ref().expect("no header for payload");
+        let header = state
+            .header
+            .as_ref()
+            .ok_or_else(|| anyhow!("no header for payload"))?;
         self.transition_state(true, header.ty, header.flags)?;
         match (header.flags, payload) {
             (Flags::Data(flags), FramePayload::Data { data, .. }) => {
@@ -188,7 +191,7 @@ impl Stream {
 
                 self.headers_buffer.extend(fragment);
                 if flags.contains(HeadersFlags::END_HEADERS) {
-                    self.decode_headers(&mut state.header_decoder);
+                    self.decode_headers(&mut state.header_decoder)?;
                 } else {
                     self.continuing = Some(Continuing::Headers);
                 }
@@ -198,11 +201,11 @@ impl Stream {
                     flags.contains(HeadersFlags::END_STREAM),
                 ) {
                     (true, true) => {
-                        self.decode_headers(&mut state.header_decoder);
+                        self.decode_headers(&mut state.header_decoder)?;
                         self.send_response();
                     }
                     (true, false) => {
-                        self.decode_headers(&mut state.header_decoder);
+                        self.decode_headers(&mut state.header_decoder)?;
                     }
                     (false, true) | (false, false) => {}
                 }
@@ -226,7 +229,7 @@ impl Stream {
             (Flags::PushPromise(flags), FramePayload::PushPromise { fragment, .. }) => {
                 self.headers_buffer.extend(fragment);
                 if flags.contains(PushPromiseFlags::END_HEADERS) {
-                    self.decode_headers(&mut state.header_decoder);
+                    self.decode_headers(&mut state.header_decoder)?;
                 } else {
                     self.continuing = Some(Continuing::PushPromise);
                 }
@@ -241,7 +244,7 @@ impl Stream {
                 if flags.contains(ContinuationFlags::END_HEADERS) {
                     self.continuing = None;
 
-                    self.decode_headers(&mut state.header_decoder);
+                    self.decode_headers(&mut state.header_decoder)?;
                     if self.state != StreamState::Open {
                         self.send_response();
                     }
@@ -260,7 +263,7 @@ impl Stream {
         Ok(())
     }
 
-    fn decode_headers(&mut self, header_decoder: &mut hpack::Decoder) {
+    fn decode_headers(&mut self, header_decoder: &mut hpack::Decoder) -> Result<(), DecodeError> {
         header_decoder
             .decode_with_cb(&self.headers_buffer, |key, value| {
                 self.response_headers
@@ -268,8 +271,9 @@ impl Stream {
                     .or_default()
                     .push(String::from_utf8_lossy(&value).to_string());
             })
-            .expect("decode_with_cb");
+            .map_err(DecodeError::InvalidHeader)?;
         self.headers_buffer.clear();
+        Ok(())
     }
 
     fn send_response(&mut self) {

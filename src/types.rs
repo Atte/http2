@@ -10,7 +10,7 @@ pub type NonZeroStreamId = std::num::NonZeroU32;
 pub type Headers = HashMap<String, Vec<String>>;
 
 #[derive(thiserror::Error, Debug)]
-pub enum FrameDecodeError {
+pub enum DecodeError {
     #[error("Not enough bytes to decode frame")]
     TooShort,
     #[error("Unknown frame type")]
@@ -21,6 +21,16 @@ pub enum FrameDecodeError {
     ZeroWindowIncrement,
     #[error("Unknown error type")]
     UnknownErrorType,
+    #[error("Invalid header: {0:?}")]
+    InvalidHeader(hpack::decoder::DecoderError),
+}
+
+#[derive(thiserror::Error, Debug)]
+pub enum RequestError {
+    #[error("The connection ran out of stream IDs")]
+    OutOfStreamIds,
+    #[error("Request authority cannot be a base")]
+    AuthorityCannotBeBase,
 }
 
 /// https://httpwg.org/specs/rfc7540.html#FrameTypes

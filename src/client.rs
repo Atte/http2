@@ -14,7 +14,6 @@ pub struct Client {
 }
 
 impl Client {
-    #[cfg(not(http2_reconnect_every_time))]
     pub async fn request(&self, request: Request) -> anyhow::Result<Response> {
         let origin = request.url.origin();
         let mut connections = self.connections.lock().await;
@@ -28,13 +27,14 @@ impl Client {
     }
 
     // for debugging session resumption and such
-    #[cfg(http2_reconnect_every_time)]
+    /*
     pub async fn request(&self, request: Request) -> anyhow::Result<Response> {
         Ok(Connection::connect(&request.url, &self.connector)
             .await?
             .request(request)
             .await?)
     }
+    */
 }
 
 impl Default for Client {
