@@ -45,7 +45,7 @@ impl Default for Client {
         config.alpn_protocols = vec![vec![b'h', b'2']];
         Self {
             connector: Arc::new(config).into(),
-            connections: Mutex::default(),
+            connections: Default::default(),
         }
     }
 }
